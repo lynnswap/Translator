@@ -6,7 +6,7 @@ import Translation
 public protocol TranslationService: Sendable {
     func translateStream(
         requests: [TranslationRequest],
-        targetLanguage: String
+        targetLanguage: Locale.Language
     ) -> AsyncThrowingStream<[TranslationUpdate], Error>
 }
 
@@ -16,7 +16,7 @@ public struct AppleTranslationService: Sendable, TranslationService {
     public init() {}
     public func translateStream(
         requests: [TranslationRequest],
-        targetLanguage: String
+        targetLanguage: Locale.Language
     ) -> AsyncThrowingStream<[TranslationUpdate], Error> {
         if requests.isEmpty {
             return AsyncThrowingStream { $0.finish() }
@@ -29,8 +29,8 @@ public struct AppleTranslationService: Sendable, TranslationService {
                     for (sourceLanguage, groupItems) in groups {
                         group.addTask {
                             let session = TranslationSession(
-                                installedSource: .init(identifier: sourceLanguage),
-                                target: .init(identifier: targetLanguage)
+                                installedSource: sourceLanguage,
+                                target: targetLanguage
                             )
                             let translationRequests: [TranslationSession.Request] = groupItems.map { request in
                                 .init(sourceText: request.text, clientIdentifier: request.id)

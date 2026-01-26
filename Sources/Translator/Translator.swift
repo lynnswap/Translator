@@ -5,12 +5,12 @@ public struct TranslationRequest: Hashable, Sendable {
     /// The cache key is (id, targetLanguage), so id must uniquely represent the source text and source language.
     public let id: String
     public let text: String
-    public let sourceLanguage: String
+    public let sourceLanguage: Locale.Language
 
     public init(
         id: String,
         text: String,
-        sourceLanguage: String
+        sourceLanguage: Locale.Language
     ) {
         self.id = id
         self.text = text
@@ -39,7 +39,7 @@ public final class Translator: Sendable {
     }
     public func translateStream(
         requests: [TranslationRequest],
-        targetLanguage: String,
+        targetLanguage: Locale.Language,
         service: any TranslationService
     ) -> AsyncThrowingStream<[TranslationUpdate], Error> {
         if requests.isEmpty {
@@ -102,7 +102,7 @@ public final class Translator: Sendable {
     @available(iOS 26.0, macOS 26.0, *)
     public func translateStream(
         requests: [TranslationRequest],
-        targetLanguage: String
+        targetLanguage: Locale.Language
     ) -> AsyncThrowingStream<[TranslationUpdate], Error> {
         translateStream(
             requests: requests,
@@ -116,7 +116,7 @@ public final class Translator: Sendable {
         cache.removeAll()
     }
 
-    public func invalidate(id: String, targetLanguage: String) async {
+    public func invalidate(id: String, targetLanguage: Locale.Language) async {
         cache.remove(id: id, targetLanguage: targetLanguage)
     }
 }
