@@ -41,6 +41,5 @@ await translator.invalidate(id: "1", targetLanguage: Locale.Language(identifier:
 ## Notes
 
 - Request IDs must be unique per source text and source language. The cache key is `(id, targetLanguage)`.
-- `targetLanguage` is optional; services decide how to resolve `nil`.
 - Cached hits are yielded first, then live updates.
 - Empty update batches are ignored.

@@ -4,11 +4,11 @@ import Testing
 @testable import Translator
 
 private struct StubTranslationService: TranslationService, Sendable {
-    let handler: @Sendable ([TranslationRequest], Locale.Language?) -> AsyncThrowingStream<[TranslationUpdate], Error>
+    let handler: @Sendable ([TranslationRequest], Locale.Language) -> AsyncThrowingStream<[TranslationUpdate], Error>
 
     func translateStream(
         requests: [TranslationRequest],
-        targetLanguage: Locale.Language?
+        targetLanguage: Locale.Language
     ) -> AsyncThrowingStream<[TranslationUpdate], Error> {
         handler(requests, targetLanguage)
     }
@@ -19,12 +19,12 @@ private final class ServiceRecorder: @unchecked Sendable {
     struct Call: Sendable {
         var count = 0
         var requests: [TranslationRequest] = []
-        var targetLanguage: Locale.Language?
+        var targetLanguage: Locale.Language = Locale.Language(identifier: "en")
     }
 
     private let lock = Mutex(Call())
 
-    func record(requests: [TranslationRequest], targetLanguage: Locale.Language?) {
+    func record(requests: [TranslationRequest], targetLanguage: Locale.Language) {
         lock.withLock { call in
             call.count += 1
             call.requests = requests

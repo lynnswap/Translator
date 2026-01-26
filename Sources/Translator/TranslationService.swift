@@ -6,7 +6,7 @@ import Translation
 public protocol TranslationService: Sendable {
     func translateStream(
         requests: [TranslationRequest],
-        targetLanguage: Locale.Language?
+        targetLanguage: Locale.Language
     ) -> AsyncThrowingStream<[TranslationUpdate], Error>
 }
 
@@ -16,7 +16,7 @@ public struct AppleTranslationService: Sendable, TranslationService {
     public init() {}
     public func translateStream(
         requests: [TranslationRequest],
-        targetLanguage: Locale.Language?
+        targetLanguage: Locale.Language
     ) -> AsyncThrowingStream<[TranslationUpdate], Error> {
         if requests.isEmpty {
             return AsyncThrowingStream { $0.finish() }

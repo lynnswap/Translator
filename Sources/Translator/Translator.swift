@@ -39,7 +39,7 @@ public final class Translator: Sendable {
     }
     public func translateStream(
         requests: [TranslationRequest],
-        targetLanguage: Locale.Language?,
+        targetLanguage: Locale.Language,
         service: any TranslationService
     ) -> AsyncThrowingStream<[TranslationUpdate], Error> {
         if requests.isEmpty {
@@ -102,7 +102,7 @@ public final class Translator: Sendable {
     @available(iOS 26.0, macOS 26.0, *)
     public func translateStream(
         requests: [TranslationRequest],
-        targetLanguage: Locale.Language?
+        targetLanguage: Locale.Language
     ) -> AsyncThrowingStream<[TranslationUpdate], Error> {
         translateStream(
             requests: requests,
@@ -116,7 +116,7 @@ public final class Translator: Sendable {
         cache.removeAll()
     }
 
-    public func invalidate(id: String, targetLanguage: Locale.Language?) async {
+    public func invalidate(id: String, targetLanguage: Locale.Language) async {
         cache.remove(id: id, targetLanguage: targetLanguage)
     }
 }
