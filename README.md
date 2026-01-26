@@ -10,16 +10,17 @@ Lightweight streaming translation wrapper with in-memory caching.
 ## Usage
 
 ```swift
+import Foundation
 import Translator
 
 let requests = [
-    TranslationRequest(id: "1", text: "hola", sourceLanguage: "es")
+    TranslationRequest(id: "1", text: "hola", sourceLanguage: Locale.Language(identifier: "es"))
 ]
 
 if #available(iOS 26.0, macOS 26.0, *) {
     let stream = Translator.shared.translateStream(
         requests: requests,
-        targetLanguage: "en"
+        targetLanguage: Locale.Language(identifier: "en")
     )
 
     for try await batch in stream {
@@ -34,11 +35,12 @@ if #available(iOS 26.0, macOS 26.0, *) {
 
 ```swift
 await translator.clearCache()
-await translator.invalidate(id: "1", targetLanguage: "en")
+await translator.invalidate(id: "1", targetLanguage: Locale.Language(identifier: "en"))
 ```
 
 ## Notes
 
 - Request IDs must be unique per source text and source language. The cache key is `(id, targetLanguage)`.
+- `targetLanguage` is optional; services decide how to resolve `nil`.
 - Cached hits are yielded first, then live updates.
 - Empty update batches are ignored.

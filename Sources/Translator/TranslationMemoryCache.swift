@@ -5,9 +5,9 @@ public final class TranslationMemoryCache: @unchecked Sendable {
     // SAFETY: This type only wraps NSCache, which is thread-safe for concurrent access.
     private final class CacheKey: NSObject {
         let id: String
-        let targetLanguage: String
+        let targetLanguage: Locale.Language?
 
-        init(id: String, targetLanguage: String) {
+        init(id: String, targetLanguage: Locale.Language?) {
             self.id = id
             self.targetLanguage = targetLanguage
         }
@@ -32,12 +32,12 @@ public final class TranslationMemoryCache: @unchecked Sendable {
         cache.countLimit = countLimit
     }
 
-    public func get(id: String, targetLanguage: String) -> String? {
+    public func get(id: String, targetLanguage: Locale.Language?) -> String? {
         let key = CacheKey(id: id, targetLanguage: targetLanguage)
         return cache.object(forKey: key) as String?
     }
 
-    public func getMany(_ ids: [String], targetLanguage: String) -> [String: String] {
+    public func getMany(_ ids: [String], targetLanguage: Locale.Language?) -> [String: String] {
         var result: [String: String] = [:]
         result.reserveCapacity(ids.count)
         for id in ids {
@@ -49,7 +49,7 @@ public final class TranslationMemoryCache: @unchecked Sendable {
         return result
     }
 
-    public func setMany(_ dict: [String: String], targetLanguage: String) {
+    public func setMany(_ dict: [String: String], targetLanguage: Locale.Language?) {
         lock.withLock { _ in
             for (id, text) in dict {
                 let key = CacheKey(id: id, targetLanguage: targetLanguage)
@@ -58,7 +58,7 @@ public final class TranslationMemoryCache: @unchecked Sendable {
         }
     }
 
-    public func remove(id: String, targetLanguage: String) {
+    public func remove(id: String, targetLanguage: Locale.Language?) {
         lock.withLock { _ in
             let key = CacheKey(id: id, targetLanguage: targetLanguage)
             cache.removeObject(forKey: key)

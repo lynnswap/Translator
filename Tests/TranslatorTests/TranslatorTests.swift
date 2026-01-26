@@ -1,13 +1,14 @@
+import Foundation
 import Synchronization
 import Testing
 @testable import Translator
 
 private struct StubTranslationService: TranslationService, Sendable {
-    let handler: @Sendable ([TranslationRequest], String) -> AsyncThrowingStream<[TranslationUpdate], Error>
+    let handler: @Sendable ([TranslationRequest], Locale.Language?) -> AsyncThrowingStream<[TranslationUpdate], Error>
 
     func translateStream(
         requests: [TranslationRequest],
-        targetLanguage: String
+        targetLanguage: Locale.Language?
     ) -> AsyncThrowingStream<[TranslationUpdate], Error> {
         handler(requests, targetLanguage)
     }
@@ -18,12 +19,12 @@ private final class ServiceRecorder: @unchecked Sendable {
     struct Call: Sendable {
         var count = 0
         var requests: [TranslationRequest] = []
-        var targetLanguage = ""
+        var targetLanguage: Locale.Language?
     }
 
     private let lock = Mutex(Call())
 
-    func record(requests: [TranslationRequest], targetLanguage: String) {
+    func record(requests: [TranslationRequest], targetLanguage: Locale.Language?) {
         lock.withLock { call in
             call.count += 1
             call.requests = requests
@@ -101,6 +102,10 @@ private func waitForTermination(
     return probe.isTerminated()
 }
 
+private func makeLanguage(_ identifier: String) -> Locale.Language {
+    Locale.Language(identifier: identifier)
+}
+
 @Test func translateStream_emptyRequestsDoesNotCallService() async throws {
     let recorder = ServiceRecorder()
     let service = StubTranslationService { requests, targetLanguage in
@@ -110,7 +115,7 @@ private func waitForTermination(
     let translator = Translator(cache: TranslationMemoryCache())
 
     let batches = try await collectBatches(
-        translator.translateStream(requests: [], targetLanguage: "en", service: service)
+        translator.translateStream(requests: [], targetLanguage: makeLanguage("en"), service: service)
     )
 
     #expect(batches.isEmpty)
@@ -119,7 +124,7 @@ private func waitForTermination(
 
 @Test func translateStream_allCachedSkipsService() async throws {
     let cache = TranslationMemoryCache()
-    cache.setMany(["1": "cached-1", "2": "cached-2"], targetLanguage: "en")
+    cache.setMany(["1": "cached-1", "2": "cached-2"], targetLanguage: makeLanguage("en"))
     let recorder = ServiceRecorder()
     let service = StubTranslationService { requests, targetLanguage in
         recorder.record(requests: requests, targetLanguage: targetLanguage)
@@ -127,12 +132,12 @@ private func waitForTermination(
     }
     let translator = Translator(cache: cache)
     let requests = [
-        TranslationRequest(id: "1", text: "hello", sourceLanguage: "en"),
-        TranslationRequest(id: "2", text: "hola", sourceLanguage: "es")
+        TranslationRequest(id: "1", text: "hello", sourceLanguage: makeLanguage("en")),
+        TranslationRequest(id: "2", text: "hola", sourceLanguage: makeLanguage("es"))
     ]
 
     let batches = try await collectBatches(
-        translator.translateStream(requests: requests, targetLanguage: "en", service: service)
+        translator.translateStream(requests: requests, targetLanguage: makeLanguage("en"), service: service)
     )
 
     #expect(batches.count == 1)
@@ -143,7 +148,7 @@ private func waitForTermination(
 
 @Test func translateStream_ignoresCacheForOtherTargetLanguage() async throws {
     let cache = TranslationMemoryCache()
-    cache.setMany(["1": "cached-en"], targetLanguage: "en")
+    cache.setMany(["1": "cached-en"], targetLanguage: makeLanguage("en"))
     let recorder = ServiceRecorder()
     let service = StubTranslationService { requests, targetLanguage in
         recorder.record(requests: requests, targetLanguage: targetLanguage)
@@ -151,24 +156,24 @@ private func waitForTermination(
     }
     let translator = Translator(cache: cache)
     let requests = [
-        TranslationRequest(id: "1", text: "hello", sourceLanguage: "en")
+        TranslationRequest(id: "1", text: "hello", sourceLanguage: makeLanguage("en"))
     ]
 
     let batches = try await collectBatches(
-        translator.translateStream(requests: requests, targetLanguage: "es", service: service)
+        translator.translateStream(requests: requests, targetLanguage: makeLanguage("es"), service: service)
     )
 
     #expect(batches.count == 1)
     #expect(batches[0].map(\.text) == ["translated-es"])
     #expect(recorder.snapshot().requests.map(\.id) == ["1"])
-    #expect(recorder.snapshot().targetLanguage == "es")
-    #expect(cache.get(id: "1", targetLanguage: "en") == "cached-en")
-    #expect(cache.get(id: "1", targetLanguage: "es") == "translated-es")
+    #expect(recorder.snapshot().targetLanguage == makeLanguage("es"))
+    #expect(cache.get(id: "1", targetLanguage: makeLanguage("en")) == "cached-en")
+    #expect(cache.get(id: "1", targetLanguage: makeLanguage("es")) == "translated-es")
 }
 
 @Test func translateStream_yieldsCachedThenServiceUpdates() async throws {
     let cache = TranslationMemoryCache()
-    cache.setMany(["1": "cached"], targetLanguage: "en")
+    cache.setMany(["1": "cached"], targetLanguage: makeLanguage("en"))
     let recorder = ServiceRecorder()
     let service = StubTranslationService { requests, targetLanguage in
         recorder.record(requests: requests, targetLanguage: targetLanguage)
@@ -178,12 +183,12 @@ private func waitForTermination(
     }
     let translator = Translator(cache: cache)
     let requests = [
-        TranslationRequest(id: "1", text: "hello", sourceLanguage: "en"),
-        TranslationRequest(id: "2", text: "hola", sourceLanguage: "es")
+        TranslationRequest(id: "1", text: "hello", sourceLanguage: makeLanguage("en")),
+        TranslationRequest(id: "2", text: "hola", sourceLanguage: makeLanguage("es"))
     ]
 
     let batches = try await collectBatches(
-        translator.translateStream(requests: requests, targetLanguage: "en", service: service)
+        translator.translateStream(requests: requests, targetLanguage: makeLanguage("en"), service: service)
     )
 
     #expect(batches.count == 2)
@@ -192,7 +197,7 @@ private func waitForTermination(
     #expect(batches[1].map(\.id) == ["2"])
     #expect(batches[1].map(\.text) == ["translated"])
     #expect(recorder.snapshot().requests.map(\.id) == ["2"])
-    #expect(recorder.snapshot().targetLanguage == "en")
+    #expect(recorder.snapshot().targetLanguage == makeLanguage("en"))
 }
 
 @Test func translateStream_cachesServiceUpdates() async throws {
@@ -202,14 +207,14 @@ private func waitForTermination(
     }
     let translator = Translator(cache: cache)
     let requests = [
-        TranslationRequest(id: "1", text: "hello", sourceLanguage: "en")
+        TranslationRequest(id: "1", text: "hello", sourceLanguage: makeLanguage("en"))
     ]
 
     _ = try await collectBatches(
-        translator.translateStream(requests: requests, targetLanguage: "en", service: service)
+        translator.translateStream(requests: requests, targetLanguage: makeLanguage("en"), service: service)
     )
 
-    #expect(cache.get(id: "1", targetLanguage: "en") == "cached")
+    #expect(cache.get(id: "1", targetLanguage: makeLanguage("en")) == "cached")
 }
 
 @Test func translateStream_skipsEmptyBatches() async throws {
@@ -221,11 +226,11 @@ private func waitForTermination(
     }
     let translator = Translator(cache: TranslationMemoryCache())
     let requests = [
-        TranslationRequest(id: "1", text: "hello", sourceLanguage: "en")
+        TranslationRequest(id: "1", text: "hello", sourceLanguage: makeLanguage("en"))
     ]
 
     let batches = try await collectBatches(
-        translator.translateStream(requests: requests, targetLanguage: "en", service: service)
+        translator.translateStream(requests: requests, targetLanguage: makeLanguage("en"), service: service)
     )
 
     #expect(batches.count == 1)
@@ -239,12 +244,12 @@ private func waitForTermination(
     }
     let translator = Translator(cache: TranslationMemoryCache())
     let requests = [
-        TranslationRequest(id: "1", text: "hello", sourceLanguage: "en")
+        TranslationRequest(id: "1", text: "hello", sourceLanguage: makeLanguage("en"))
     ]
 
     do {
         _ = try await collectBatches(
-            translator.translateStream(requests: requests, targetLanguage: "en", service: service)
+            translator.translateStream(requests: requests, targetLanguage: makeLanguage("en"), service: service)
         )
         #expect(Bool(false))
     } catch let error as TestError {
@@ -256,24 +261,24 @@ private func waitForTermination(
 
 @Test func clearCache_removesAllEntries() async {
     let cache = TranslationMemoryCache()
-    cache.setMany(["1": "cached"], targetLanguage: "en")
+    cache.setMany(["1": "cached"], targetLanguage: makeLanguage("en"))
     let translator = Translator(cache: cache)
 
     await translator.clearCache()
 
-    #expect(cache.get(id: "1", targetLanguage: "en") == nil)
+    #expect(cache.get(id: "1", targetLanguage: makeLanguage("en")) == nil)
 }
 
 @Test func invalidate_removesEntryForTargetLanguage() async {
     let cache = TranslationMemoryCache()
-    cache.setMany(["1": "cached-en"], targetLanguage: "en")
-    cache.setMany(["1": "cached-es"], targetLanguage: "es")
+    cache.setMany(["1": "cached-en"], targetLanguage: makeLanguage("en"))
+    cache.setMany(["1": "cached-es"], targetLanguage: makeLanguage("es"))
     let translator = Translator(cache: cache)
 
-    await translator.invalidate(id: "1", targetLanguage: "en")
+    await translator.invalidate(id: "1", targetLanguage: makeLanguage("en"))
 
-    #expect(cache.get(id: "1", targetLanguage: "en") == nil)
-    #expect(cache.get(id: "1", targetLanguage: "es") == "cached-es")
+    #expect(cache.get(id: "1", targetLanguage: makeLanguage("en")) == nil)
+    #expect(cache.get(id: "1", targetLanguage: makeLanguage("es")) == "cached-es")
 }
 
 @Test func translateStream_cancelsDriverOnTermination() async {
@@ -283,14 +288,14 @@ private func waitForTermination(
     }
     let translator = Translator(cache: TranslationMemoryCache())
     let requests = [
-        TranslationRequest(id: "1", text: "hello", sourceLanguage: "en")
+        TranslationRequest(id: "1", text: "hello", sourceLanguage: makeLanguage("en"))
     ]
 
     let task = Task {
         do {
             for try await _ in translator.translateStream(
                 requests: requests,
-                targetLanguage: "en",
+                targetLanguage: makeLanguage("en"),
                 service: service
             ) {}
         } catch {
