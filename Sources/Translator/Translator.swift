@@ -1,6 +1,8 @@
 import Foundation
 
 public struct TranslationRequest: Hashable, Sendable {
+    /// A stable identifier used for caching.
+    /// The cache key is (id, targetLanguage), so id must uniquely represent the source text and source language.
     public let id: String
     public let text: String
     public let sourceLanguage: String
