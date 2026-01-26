@@ -1,5 +1,7 @@
 import Foundation
+#if canImport(Translation)
 import Translation
+#endif
 
 public protocol TranslationService: Sendable {
     func translateStream(
@@ -8,6 +10,7 @@ public protocol TranslationService: Sendable {
     ) -> AsyncThrowingStream<[TranslationUpdate], Error>
 }
 
+#if canImport(Translation)
 @available(iOS 26.0, macOS 26.0, *)
 public struct AppleTranslationService: Sendable, TranslationService {
     public init() {}
@@ -54,3 +57,4 @@ public struct AppleTranslationService: Sendable, TranslationService {
         }
     }
 }
+#endif

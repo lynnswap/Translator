@@ -98,6 +98,7 @@ public final class Translator: Sendable {
         }
     }
 
+    #if canImport(Translation)
     @available(iOS 26.0, macOS 26.0, *)
     public func translateStream(
         requests: [TranslationRequest],
@@ -109,6 +110,7 @@ public final class Translator: Sendable {
             service: AppleTranslationService()
         )
     }
+    #endif
 
     public func clearCache() async {
         cache.removeAll()
