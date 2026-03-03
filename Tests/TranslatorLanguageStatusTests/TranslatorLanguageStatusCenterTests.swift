@@ -1,5 +1,4 @@
 import Foundation
-import Synchronization
 import Testing
 @testable import TranslatorLanguageStatus
 
@@ -47,89 +46,161 @@ private func flushMainActor() async {
 
     #expect(bridge.stopCount == 1)
     #expect(!center.isMonitoring)
-    #expect(center.latestByLocale.isEmpty)
+    #expect(center.modelsByLocale.isEmpty)
 }
 
 @MainActor
-@Test func emitsProgressAndStateNotificationsByDiff() async {
+@Test func sharedMonitoringRequiresMatchingStopCalls() {
     let bridge = FakeLanguageStatusBridge()
     let center = TranslatorLanguageStatusCenter(bridge: bridge)
 
-    let counts = Mutex((progress: 0, state: 0))
+    center.startMonitoring(taskHint: 0)
+    center.startMonitoring(taskHint: 0)
+    #expect(bridge.startCount == 1)
+    #expect(center.isMonitoring)
 
-    let progressToken = NotificationCenter.default.addObserver(
-        forName: .translatorLanguageProgressDidChange,
-        object: center,
-        queue: .main
-    ) { _ in
-        counts.withLock { value in
-            value.progress += 1
-        }
-    }
+    center.stopMonitoring()
+    #expect(bridge.stopCount == 0)
+    #expect(center.isMonitoring)
 
-    let stateToken = NotificationCenter.default.addObserver(
-        forName: .translatorLanguageStateDidChange,
-        object: center,
-        queue: .main
-    ) { _ in
-        counts.withLock { value in
-            value.state += 1
-        }
-    }
+    center.stopMonitoring()
+    #expect(bridge.stopCount == 1)
+    #expect(!center.isMonitoring)
+}
 
-    defer {
-        NotificationCenter.default.removeObserver(progressToken)
-        NotificationCenter.default.removeObserver(stateToken)
-    }
+@MainActor
+@Test func firstEventCreatesLocaleModelAndAppliesValues() async throws {
+    let bridge = FakeLanguageStatusBridge()
+    let center = TranslatorLanguageStatusCenter(bridge: bridge)
+
+    center.startMonitoring(taskHint: 42)
+    bridge.emit([
+        LanguageResourceStatusEvent(
+            localeIdentifier: "en_US",
+            progress: 1.5,
+            statusCode: 3,
+            downloadSize: 1024,
+            isIndeterminate: true,
+            rank: 4,
+            taskHint: 42
+        )
+    ])
+    await flushMainActor()
+
+    let model = try #require(center.model(for: "en-US"))
+    #expect(center.modelsByLocale.count == 1)
+    #expect(model.localeIdentifier == "en-us")
+    #expect(model.progress == 1)
+    #expect(model.statusCode == 3)
+    #expect(model.downloadSize == 1024)
+    #expect(model.isIndeterminate)
+    #expect(model.rank == 4)
+    #expect(model.taskHint == 42)
+    #expect(model.hasValue)
+}
+
+@MainActor
+@Test func sameLocaleReusesSingleObservableModel() async throws {
+    let bridge = FakeLanguageStatusBridge()
+    let center = TranslatorLanguageStatusCenter(bridge: bridge)
 
     center.startMonitoring(taskHint: 0)
-
-    let first = LanguageResourceStatusEvent(
-        localeIdentifier: "en-US",
-        progress: 0.25,
-        statusCode: 1,
-        downloadSize: 1024,
-        isIndeterminate: false,
-        rank: 0,
-        taskHint: 0
-    )
-    bridge.emit([first])
+    bridge.emit([
+        LanguageResourceStatusEvent(
+            localeIdentifier: "en-US",
+            progress: 0.1,
+            statusCode: 1,
+            downloadSize: 512,
+            isIndeterminate: false,
+            rank: 0,
+            taskHint: 0
+        )
+    ])
     await flushMainActor()
-    #expect(counts.withLock { $0.progress } == 1)
-    #expect(counts.withLock { $0.state } == 1)
 
-    bridge.emit([first])
-    await flushMainActor()
-    #expect(counts.withLock { $0.progress } == 1)
-    #expect(counts.withLock { $0.state } == 1)
+    let firstModel = try #require(center.model(for: "en-US"))
 
-    let progressOnly = LanguageResourceStatusEvent(
-        localeIdentifier: "en-US",
-        progress: 0.5,
-        statusCode: 1,
-        downloadSize: 2048,
-        isIndeterminate: false,
-        rank: 0,
-        taskHint: 0
-    )
-    bridge.emit([progressOnly])
+    bridge.emit([
+        LanguageResourceStatusEvent(
+            localeIdentifier: "en_US",
+            progress: 0.9,
+            statusCode: 2,
+            downloadSize: 2048,
+            isIndeterminate: false,
+            rank: 1,
+            taskHint: 0
+        )
+    ])
     await flushMainActor()
-    #expect(counts.withLock { $0.progress } == 2)
-    #expect(counts.withLock { $0.state } == 1)
 
-    let stateOnly = LanguageResourceStatusEvent(
-        localeIdentifier: "en-US",
-        progress: 0.5,
-        statusCode: 2,
-        downloadSize: 2048,
-        isIndeterminate: false,
-        rank: 1,
-        taskHint: 0
-    )
-    bridge.emit([stateOnly])
+    let secondModel = try #require(center.model(for: "EN-us"))
+    #expect(firstModel === secondModel)
+    #expect(center.modelsByLocale.count == 1)
+    #expect(secondModel.progress == 0.9)
+    #expect(secondModel.statusCode == 2)
+    #expect(secondModel.downloadSize == 2048)
+}
+
+@MainActor
+@Test func stopMonitoringClearsModels() async {
+    let bridge = FakeLanguageStatusBridge()
+    let center = TranslatorLanguageStatusCenter(bridge: bridge)
+
+    center.startMonitoring(taskHint: 0)
+    bridge.emit([
+        LanguageResourceStatusEvent(
+            localeIdentifier: "ja-JP",
+            progress: 0.25,
+            statusCode: 1,
+            downloadSize: 300,
+            isIndeterminate: false,
+            rank: 0,
+            taskHint: 0
+        )
+    ])
     await flushMainActor()
-    #expect(counts.withLock { $0.progress } == 2)
-    #expect(counts.withLock { $0.state } == 2)
+    #expect(!center.modelsByLocale.isEmpty)
+
+    center.stopMonitoring()
+    #expect(center.modelsByLocale.isEmpty)
+
+    bridge.emit([
+        LanguageResourceStatusEvent(
+            localeIdentifier: "ja-JP",
+            progress: 0.5,
+            statusCode: 2,
+            downloadSize: 600,
+            isIndeterminate: false,
+            rank: 1,
+            taskHint: 0
+        )
+    ])
+    await flushMainActor()
+
+    #expect(center.modelsByLocale.isEmpty)
+}
+
+@MainActor
+@Test func modelLookupNormalizesLocaleIdentifier() async {
+    let bridge = FakeLanguageStatusBridge()
+    let center = TranslatorLanguageStatusCenter(bridge: bridge)
+
+    center.startMonitoring(taskHint: 0)
+    bridge.emit([
+        LanguageResourceStatusEvent(
+            localeIdentifier: "zh-Hant_TW",
+            progress: 0.4,
+            statusCode: 1,
+            downloadSize: 1024,
+            isIndeterminate: false,
+            rank: 0,
+            taskHint: 0
+        )
+    ])
+    await flushMainActor()
+
+    #expect(center.model(for: "zh-hant-tw") != nil)
+    #expect(center.model(for: "zh_HANT_tw") != nil)
 }
 
 @MainActor
@@ -156,5 +227,5 @@ private func flushMainActor() async {
     ])
     await flushMainActor()
 
-    #expect(center.latestByLocale.isEmpty)
+    #expect(center.modelsByLocale.isEmpty)
 }
