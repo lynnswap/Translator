@@ -14,6 +14,10 @@ let package = Package(
             name: "Translator",
             targets: ["Translator"]
         ),
+        .library(
+            name: "TranslatorLanguageStatus",
+            targets: ["TranslatorLanguageStatus"]
+        ),
     ],
     targets: [
         // Targets are the basic building blocks of a package, defining a module or a test suite.
@@ -21,9 +25,17 @@ let package = Package(
         .target(
             name: "Translator"
         ),
+        .target(
+            name: "TranslatorLanguageStatus",
+            dependencies: ["Translator"]
+        ),
         .testTarget(
             name: "TranslatorTests",
             dependencies: ["Translator"]
+        ),
+        .testTarget(
+            name: "TranslatorLanguageStatusTests",
+            dependencies: ["TranslatorLanguageStatus"]
         ),
     ]
 )
