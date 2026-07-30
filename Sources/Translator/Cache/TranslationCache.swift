@@ -2,10 +2,22 @@ import Foundation
 
 actor TranslationCache {
     struct Key: Hashable, Sendable {
-        let text: String
+        private let textUTF8: [UInt8]
         let sourceLanguage: TranslationSourceLanguage
         let targetLanguage: TranslationLanguage
         let provider: AnyTranslationProvider
+
+        init(
+            text: String,
+            sourceLanguage: TranslationSourceLanguage,
+            targetLanguage: TranslationLanguage,
+            provider: AnyTranslationProvider
+        ) {
+            self.textUTF8 = Array(text.utf8)
+            self.sourceLanguage = sourceLanguage
+            self.targetLanguage = targetLanguage
+            self.provider = provider
+        }
     }
 
     private struct Entry: Sendable {

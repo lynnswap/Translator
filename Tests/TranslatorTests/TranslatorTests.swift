@@ -383,8 +383,14 @@ private func terminalError(
     try await translate(id: "configuration", provider: providerB)
     try await translate(id: "type", provider: alternateProviderA)
     try await translate(id: "text", text: "Hello!", provider: providerA)
+    let composed = "\u{00E9}"
+    let decomposed = "e\u{0301}"
+    #expect(composed == decomposed)
+    #expect(Array(composed.utf8) != Array(decomposed.utf8))
+    try await translate(id: "composed", text: composed, provider: providerA)
+    try await translate(id: "decomposed", text: decomposed, provider: providerA)
 
-    #expect(callCount.value == 7)
+    #expect(callCount.value == 9)
 }
 
 @Test func clientPassesOneCompleteMixedSourceBatchAndOrdersFreshResults() async throws {
@@ -1061,6 +1067,43 @@ private func onDeviceMapsEveryTranslationError(scenario: OnDeviceErrorScenario) 
         #expect(failure == .automaticSourceLanguageUnavailable)
     }
     #expect(driverCount.value == 0)
+}
+
+@available(iOS 26.0, macOS 26.0, *)
+@Test func onDeviceDoesNotStartDriverWhenChildBeginsCancelled() async {
+    let translationCount = CountProbe()
+    let cancellationCount = CountProbe()
+    let provider = OnDeviceTranslationProvider(
+        driverFactory: OnDeviceTranslationDriverFactory { _, _ in
+            unsafe withUnsafeCurrentTask { task in
+                unsafe task?.cancel()
+            }
+            return OnDeviceTranslationDriver(
+                translate: { requests in
+                    translationCount.increment()
+                    return successfulResults(for: requests)
+                },
+                cancel: {
+                    cancellationCount.increment()
+                }
+            )
+        }
+    )
+
+    let task = Task {
+        try await provider.translate(
+            [request(id: "cancelled", text: "Hello")],
+            to: japanese
+        )
+    }
+    switch await task.result {
+    case .success:
+        Issue.record("Cancelled on-device translation unexpectedly succeeded.")
+    case .failure(let error):
+        #expect(error is CancellationError)
+    }
+    #expect(translationCount.value == 0)
+    #expect(cancellationCount.value == 1)
 }
 
 @available(iOS 26.0, macOS 26.0, *)

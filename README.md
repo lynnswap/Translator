@@ -119,7 +119,9 @@ The on-device provider requires every request to use an explicit `.language(...)
 - `translations(for:to:using:)` returns a cold sequence. Work starts only when an iterator advances.
 - Request IDs must be unique within one operation and are used only to correlate results.
 - The provider receives the complete cache-miss batch once per operation and owns any internal grouping.
-- Cache identity includes exact source text, source-language policy, target language, provider type, and semantic provider configuration.
+- Cache identity includes the source text's exact Unicode scalar sequence, source-language policy,
+  target language, provider type, and semantic provider configuration. Canonically equivalent text
+  representations remain distinct.
 - A provider's equality and hash must remain stable while it is used with a client.
 - Each provider result may depend only on its request's text and source policy, the target language, and provider identity—not on request ID or batch membership/order.
 - Iteration yields cached results first, then one fully validated fresh batch, both in input order.

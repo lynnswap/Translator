@@ -107,10 +107,11 @@ missing assets, and provider-internal errors remain distinct ``TranslationFailur
 
 ## Result and cache semantics
 
-Cached values are keyed by exact text, source policy, target language, provider implementation type,
-and semantic provider configuration. Request IDs only correlate results. Cached results arrive first
-in input order. Fresh results arrive only after complete provider membership validation, and a
-membership failure does not modify the cache.
+Cached values are keyed by the source text's exact Unicode scalar sequence, source policy, target
+language, provider implementation type, and semantic provider configuration. Canonically equivalent
+text representations remain distinct. Request IDs only correlate results. Cached results arrive
+first in input order. Fresh results arrive only after complete provider membership validation, and
+a membership failure does not modify the cache.
 
 Each iterator starts an independent operation. An iterator yields at most two batches: cached results,
 then fully validated fresh results. Cancellation terminates iteration with `CancellationError`;

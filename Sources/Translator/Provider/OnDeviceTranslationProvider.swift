@@ -115,6 +115,7 @@ public struct OnDeviceTranslationProvider: TranslationProvider {
             let results = try await withTaskCancellationHandler {
                 let results: [TranslationResult]
                 do {
+                    try Task.checkCancellation()
                     results = try await driver.translate(requests)
                 } catch {
                     await cancellation.finishOperation()
