@@ -4,7 +4,7 @@ import Translation
 
 @available(iOS 26.0, macOS 26.0, *)
 struct OnDeviceTranslationDriver: Sendable {
-    let translate: @Sendable ([TranslationRequest]) async throws -> [TranslationTransportResult]
+    let translate: @Sendable ([TranslationRequest]) async throws -> [TranslationResult]
     let cancel: @Sendable () async -> Void
 }
 
@@ -32,35 +32,83 @@ struct OnDeviceTranslationDriverFactory: Sendable {
 }
 
 @available(iOS 26.0, macOS 26.0, *)
-struct OnDeviceTranslationTransport: Sendable {
+public struct OnDeviceTranslationProvider: TranslationProvider {
     let driverFactory: OnDeviceTranslationDriverFactory
 
-    init(driverFactory: OnDeviceTranslationDriverFactory = .live) {
+    /// Creates a provider backed by Apple's on-device Translation framework.
+    public init() {
+        self.driverFactory = .live
+    }
+
+    init(driverFactory: OnDeviceTranslationDriverFactory) {
         self.driverFactory = driverFactory
     }
 
-    var transport: TranslationTransport {
-        TranslationTransport(
-            translate: { requests, sourceLanguage, targetLanguage in
-                try await translate(
-                    requests: requests,
-                    sourceLanguage: sourceLanguage,
-                    targetLanguage: targetLanguage
-                )
-            }
-        )
+    public static func == (
+        lhs: OnDeviceTranslationProvider,
+        rhs: OnDeviceTranslationProvider
+    ) -> Bool {
+        true
     }
 
-    func translate(
-        requests: [TranslationRequest],
-        sourceLanguage: TranslationSourceLanguage,
-        targetLanguage: TranslationLanguage
-    ) async throws -> [TranslationTransportResult] {
-        guard case .language(let sourceLanguage) = sourceLanguage else {
+    public func hash(into hasher: inout Hasher) {
+        hasher.combine(ObjectIdentifier(Self.self))
+    }
+
+    /// Translates a batch using language assets already installed on the device.
+    public func translate(
+        _ requests: [TranslationRequest],
+        to targetLanguage: TranslationLanguage
+    ) async throws -> [TranslationResult] {
+        try Task.checkCancellation()
+        guard !requests.contains(where: { $0.sourceLanguage == .automatic }) else {
             throw TranslationFailure.automaticSourceLanguageUnavailable
         }
 
-        let driver = driverFactory.makeDriver(sourceLanguage, targetLanguage)
+        let groups = Dictionary(grouping: requests) { request in
+            guard case .language(let language) = request.sourceLanguage else {
+                preconditionFailure("Automatic source languages must fail during preflight.")
+            }
+            return language
+        }
+
+        let unorderedResults = try await withThrowingTaskGroup(
+            of: [TranslationResult].self,
+            returning: [TranslationResult].self
+        ) { group in
+            for (sourceLanguage, groupRequests) in groups {
+                try Task.checkCancellation()
+                let driver = driverFactory.makeDriver(sourceLanguage, targetLanguage)
+                group.addTask {
+                    let results = try await translate(groupRequests, using: driver)
+                    return try TranslationResponseMembership.validateAndOrder(
+                        results,
+                        expectedIdentifiers: groupRequests.map(\.id)
+                    )
+                }
+            }
+
+            var results: [TranslationResult] = []
+            results.reserveCapacity(requests.count)
+            do {
+                for try await groupResults in group {
+                    results.append(contentsOf: groupResults)
+                }
+            } catch {
+                group.cancelAll()
+                throw error
+            }
+            return results
+        }
+
+        try Task.checkCancellation()
+        return unorderedResults
+    }
+
+    private func translate(
+        _ requests: [TranslationRequest],
+        using driver: OnDeviceTranslationDriver
+    ) async throws -> [TranslationResult] {
         let cancellation = OnDeviceCancellationTask()
 
         do {
@@ -133,21 +181,21 @@ private actor OnDeviceTranslationSessionOwner {
 
     func translate(
         _ requests: [TranslationRequest]
-    ) async throws -> [TranslationTransportResult] {
+    ) async throws -> [TranslationResult] {
         let batch = requests.map {
             TranslationSession.Request(
                 sourceText: $0.text,
                 clientIdentifier: $0.id
             )
         }
-        var results: [TranslationTransportResult] = []
+        var results: [TranslationResult] = []
         results.reserveCapacity(requests.count)
         for try await response in session.translate(batch: batch) {
             guard let requestID = response.clientIdentifier else {
-                throw TranslationFailure.malformedResponse
+                throw TranslationFailure.providerInternal
             }
             results.append(
-                TranslationTransportResult(
+                TranslationResult(
                     requestID: requestID,
                     translatedText: response.targetText
                 )

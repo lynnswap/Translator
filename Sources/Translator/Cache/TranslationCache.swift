@@ -5,7 +5,7 @@ actor TranslationCache {
         let text: String
         let sourceLanguage: TranslationSourceLanguage
         let targetLanguage: TranslationLanguage
-        let provider: TranslationProvider
+        let provider: AnyTranslationProvider
     }
 
     private struct Entry: Sendable {

@@ -1,39 +1,29 @@
 /// A translation client with an isolated, per-instance memory cache.
 public final class TranslationClient: Sendable {
     private let cache: TranslationCache
-    private let transportFactory: TranslationTransportFactory
 
     public init() {
         self.cache = TranslationCache()
-        self.transportFactory = .live
-    }
-
-    init(
-        cache: TranslationCache = TranslationCache(),
-        transportFactory: TranslationTransportFactory
-    ) {
-        self.cache = cache
-        self.transportFactory = transportFactory
     }
 
     /// Creates a cold sequence that translates `requests` into `targetLanguage`.
     ///
     /// Iteration yields cached results first in input order. If any requests miss the cache,
     /// the next element contains all fresh results in input order after the provider's complete
-    /// result membership has been validated. A non-cancellation failure terminates iteration as
-    /// `TranslationFailure`; cancellation terminates it as `CancellationError`.
+    /// result membership has been validated. Client and on-device failures are reported as
+    /// ``TranslationFailure``. Custom provider errors pass through unchanged unless the caller task
+    /// is cancelled, in which case iteration terminates as `CancellationError`.
     public func translations(
         for requests: [TranslationRequest],
         to targetLanguage: TranslationLanguage,
-        using provider: TranslationProvider
+        using provider: some TranslationProvider
     ) -> TranslationResults {
         TranslationResults(
             operation: TranslationOperation(
                 requests: requests,
                 targetLanguage: targetLanguage,
-                provider: provider,
-                cache: cache,
-                transportFactory: transportFactory
+                provider: AnyTranslationProvider(provider),
+                cache: cache
             )
         )
     }

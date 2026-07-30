@@ -22,22 +22,19 @@ private func request(
 
 private struct RecordedCall: Sendable {
     let requests: [TranslationRequest]
-    let sourceLanguage: TranslationSourceLanguage
     let targetLanguage: TranslationLanguage
 }
 
-private actor TransportRecorder {
+private actor ProviderRecorder {
     private var calls: [RecordedCall] = []
 
     func record(
         requests: [TranslationRequest],
-        sourceLanguage: TranslationSourceLanguage,
         targetLanguage: TranslationLanguage
     ) {
         calls.append(
             RecordedCall(
                 requests: requests,
-                sourceLanguage: sourceLanguage,
                 targetLanguage: targetLanguage
             )
         )
@@ -60,29 +57,66 @@ private final class CountProbe: Sendable {
     }
 }
 
-private func makeClient(
-    finish: @escaping @Sendable () async -> Void = {},
+private struct TestProvider: TranslationProvider {
+    let identity: String
+    let recorder: ProviderRecorder
+    let handler: @Sendable (
+        [TranslationRequest],
+        TranslationLanguage
+    ) async throws -> [TranslationResult]
+
+    static func == (lhs: TestProvider, rhs: TestProvider) -> Bool {
+        lhs.identity == rhs.identity
+    }
+
+    func hash(into hasher: inout Hasher) {
+        hasher.combine(identity)
+    }
+
+    func translate(
+        _ requests: [TranslationRequest],
+        to targetLanguage: TranslationLanguage
+    ) async throws -> [TranslationResult] {
+        await recorder.record(
+            requests: requests,
+            targetLanguage: targetLanguage
+        )
+        return try await handler(requests, targetLanguage)
+    }
+}
+
+private struct AlternateTestProvider: TranslationProvider {
+    let base: TestProvider
+
+    static func == (lhs: AlternateTestProvider, rhs: AlternateTestProvider) -> Bool {
+        lhs.base.identity == rhs.base.identity
+    }
+
+    func hash(into hasher: inout Hasher) {
+        hasher.combine(base.identity)
+    }
+
+    func translate(
+        _ requests: [TranslationRequest],
+        to targetLanguage: TranslationLanguage
+    ) async throws -> [TranslationResult] {
+        try await base.translate(requests, to: targetLanguage)
+    }
+}
+
+private func makeProvider(
+    identity: String = "provider",
     handler: @escaping @Sendable (
         [TranslationRequest],
-        TranslationSourceLanguage,
         TranslationLanguage
-    ) async throws -> [TranslationTransportResult]
-) -> (client: TranslationClient, recorder: TransportRecorder) {
-    let recorder = TransportRecorder()
-    let transport = TranslationTransport(
-        translate: { requests, sourceLanguage, targetLanguage in
-            await recorder.record(
-                requests: requests,
-                sourceLanguage: sourceLanguage,
-                targetLanguage: targetLanguage
-            )
-            return try await handler(requests, sourceLanguage, targetLanguage)
-        },
-        finish: finish
-    )
+    ) async throws -> [TranslationResult]
+) -> (provider: TestProvider, recorder: ProviderRecorder) {
+    let recorder = ProviderRecorder()
     return (
-        TranslationClient(
-            transportFactory: TranslationTransportFactory { _ in transport }
+        TestProvider(
+            identity: identity,
+            recorder: recorder,
+            handler: handler
         ),
         recorder
     )
@@ -90,9 +124,9 @@ private func makeClient(
 
 private func successfulResults(
     for requests: [TranslationRequest]
-) -> [TranslationTransportResult] {
+) -> [TranslationResult] {
     requests.map {
-        TranslationTransportResult(
+        TranslationResult(
             requestID: $0.id,
             translatedText: "translated:\($0.text)"
         )
@@ -120,22 +154,6 @@ private func terminalError(
     }
 }
 
-private func endpoint(_ deploymentID: String = "deployment-A") throws -> GoogleAppsScriptEndpoint {
-    try GoogleAppsScriptEndpoint(deploymentID: deploymentID)
-}
-
-@Test func endpointRejectsEmptyWhitespaceAndPathInjection() throws {
-    for invalidID in ["", " ", "deployment/id", "deployment?id", "déploiement"] {
-        #expect(throws: TranslationFailure.invalidGoogleAppsScriptDeploymentID) {
-            try GoogleAppsScriptEndpoint(deploymentID: invalidID)
-        }
-    }
-
-    let valid = try endpoint("AKfycb_abc-123")
-    #expect(valid.deploymentID == "AKfycb_abc-123")
-    #expect(valid.url.absoluteString == "https://script.google.com/macros/s/AKfycb_abc-123/exec")
-}
-
 @Test func translationLanguageValidatesAndCanonicalizesFoundationLanguages() throws {
     #expect(try TranslationLanguage(identifier: "fr_CA").identifier == "fr-CA")
     #expect(try TranslationLanguage(identifier: "zh-Hant").identifier == "zh-Hant")
@@ -158,27 +176,61 @@ private func endpoint(_ deploymentID: String = "deployment-A") throws -> GoogleA
     }
 }
 
-@Test func sequenceIsColdAndEachIteratorHasIndependentState() async throws {
-    let factoryCount = CountProbe()
-    let transportCount = CountProbe()
-    let transport = TranslationTransport(translate: { requests, _, _ in
-        transportCount.increment()
-        return successfulResults(for: requests)
-    })
-    let client = TranslationClient(
-        transportFactory: TranslationTransportFactory { _ in
-            factoryCount.increment()
-            return transport
-        }
+@Test func providerErasurePreservesSemanticIdentityAndConcreteType() {
+    let recorder = ProviderRecorder()
+    let handler: @Sendable (
+        [TranslationRequest],
+        TranslationLanguage
+    ) async throws -> [TranslationResult] = { requests, _ in
+        successfulResults(for: requests)
+    }
+    let concrete = TestProvider(
+        identity: "same",
+        recorder: recorder,
+        handler: handler
     )
+    let equivalent = TestProvider(
+        identity: "same",
+        recorder: ProviderRecorder(),
+        handler: handler
+    )
+    let differentConfiguration = TestProvider(
+        identity: "different",
+        recorder: recorder,
+        handler: handler
+    )
+    let differentType = AlternateTestProvider(base: equivalent)
+    let existential: any TranslationProvider = concrete
+
+    let erased = AnyTranslationProvider(concrete)
+    #expect(erased == AnyTranslationProvider(equivalent))
+    #expect(erased == AnyTranslationProvider(existential))
+    #expect(erased != AnyTranslationProvider(differentConfiguration))
+    #expect(erased != AnyTranslationProvider(differentType))
+    #expect(
+        Set([
+            erased,
+            AnyTranslationProvider(equivalent),
+            AnyTranslationProvider(differentConfiguration),
+            AnyTranslationProvider(differentType),
+        ]).count == 3
+    )
+}
+
+@Test func sequenceIsColdAndEachIteratorHasIndependentState() async throws {
+    let callCount = CountProbe()
+    let (provider, _) = makeProvider { requests, _ in
+        callCount.increment()
+        return successfulResults(for: requests)
+    }
+    let client = TranslationClient()
     let sequence = client.translations(
         for: [request(id: "first", text: "Hello")],
         to: japanese,
-        using: .googleAppsScript(try endpoint())
+        using: provider
     )
 
-    #expect(factoryCount.value == 0)
-    #expect(transportCount.value == 0)
+    #expect(callCount.value == 0)
 
     var firstIterator = sequence.makeAsyncIterator()
     var secondIterator = sequence.makeAsyncIterator()
@@ -186,44 +238,36 @@ private func endpoint(_ deploymentID: String = "deployment-A") throws -> GoogleA
     #expect(try await firstIterator.next() == nil)
     #expect(try await secondIterator.next()?.map(\.requestID) == ["first"])
     #expect(try await secondIterator.next() == nil)
-    #expect(factoryCount.value == 1)
-    #expect(transportCount.value == 1)
+    #expect(callCount.value == 1)
 }
 
-@Test func emptyInputFinishesWithoutResolvingTransport() async throws {
-    let factoryCount = CountProbe()
-    let client = TranslationClient(
-        transportFactory: TranslationTransportFactory { _ in
-            factoryCount.increment()
-            return TranslationTransport(translate: { requests, _, _ in
-                successfulResults(for: requests)
-            })
-        }
-    )
+@Test func emptyInputFinishesWithoutCallingProvider() async throws {
+    let callCount = CountProbe()
+    let (provider, _) = makeProvider { requests, _ in
+        callCount.increment()
+        return successfulResults(for: requests)
+    }
 
     let batches = try await collect(
-        client.translations(
+        TranslationClient().translations(
             for: [],
             to: japanese,
-            using: .googleAppsScript(try endpoint())
+            using: provider
         )
     )
     #expect(batches.isEmpty)
-    #expect(factoryCount.value == 0)
+    #expect(callCount.value == 0)
 }
 
 @Test func clientAliasesShareCacheButSeparateClientsDoNot() async throws {
-    let provider = TranslationProvider.googleAppsScript(try endpoint())
     let callCount = CountProbe()
-    let factory = TranslationTransportFactory { _ in
-        TranslationTransport(translate: { requests, _, _ in
-            callCount.increment()
-            return successfulResults(for: requests)
-        })
+    let (provider, _) = makeProvider { requests, _ in
+        callCount.increment()
+        return successfulResults(for: requests)
     }
-    let firstClient = TranslationClient(transportFactory: factory)
+    let firstClient = TranslationClient()
     let alias = firstClient
-    let secondClient = TranslationClient(transportFactory: factory)
+    let secondClient = TranslationClient()
 
     _ = try await collect(
         firstClient.translations(
@@ -251,10 +295,10 @@ private func endpoint(_ deploymentID: String = "deployment-A") throws -> GoogleA
 }
 
 @Test func cacheUsesContentIdentityAndKeepsRequestIDsAsCorrelationOnly() async throws {
-    let (client, recorder) = makeClient { requests, _, _ in
+    let (provider, recorder) = makeProvider { requests, _ in
         successfulResults(for: requests)
     }
-    let provider = TranslationProvider.googleAppsScript(try endpoint())
+    let client = TranslationClient()
 
     _ = try await collect(
         client.translations(
@@ -282,19 +326,45 @@ private func endpoint(_ deploymentID: String = "deployment-A") throws -> GoogleA
     #expect(await recorder.snapshot().count == 2)
 }
 
-@Test func cacheSeparatesSourcePolicyTargetAndProviderIdentity() async throws {
-    let (client, recorder) = makeClient { requests, _, _ in
-        successfulResults(for: requests)
+@Test func cacheSeparatesTextSourceTargetProviderConfigurationAndType() async throws {
+    let callCount = CountProbe()
+    let handler: @Sendable (
+        [TranslationRequest],
+        TranslationLanguage
+    ) async throws -> [TranslationResult] = { requests, _ in
+        callCount.increment()
+        return successfulResults(for: requests)
     }
-    let providerA = TranslationProvider.googleAppsScript(try endpoint("deployment-A"))
-    let providerB = TranslationProvider.googleAppsScript(try endpoint("deployment-B"))
+    let providerA = TestProvider(
+        identity: "A",
+        recorder: ProviderRecorder(),
+        handler: handler
+    )
+    let equivalentProviderA = TestProvider(
+        identity: "A",
+        recorder: ProviderRecorder(),
+        handler: handler
+    )
+    let providerB = TestProvider(
+        identity: "B",
+        recorder: ProviderRecorder(),
+        handler: handler
+    )
+    let alternateProviderA = AlternateTestProvider(
+        base: TestProvider(
+            identity: "A",
+            recorder: ProviderRecorder(),
+            handler: handler
+        )
+    )
+    let client = TranslationClient()
 
     func translate(
         id: String,
         text: String = "Hello",
         source: TranslationSourceLanguage = known(english),
         target: TranslationLanguage = japanese,
-        provider: TranslationProvider = providerA
+        provider: some TranslationProvider
     ) async throws {
         _ = try await collect(
             client.translations(
@@ -305,19 +375,20 @@ private func endpoint(_ deploymentID: String = "deployment-A") throws -> GoogleA
         )
     }
 
-    try await translate(id: "base")
-    try await translate(id: "correlation")
-    try await translate(id: "automatic", source: .automatic)
-    try await translate(id: "source", source: known(french))
-    try await translate(id: "target", target: english)
-    try await translate(id: "provider", provider: providerB)
-    try await translate(id: "text", text: "Hello!")
+    try await translate(id: "base", provider: providerA)
+    try await translate(id: "correlation", provider: equivalentProviderA)
+    try await translate(id: "automatic", source: .automatic, provider: providerA)
+    try await translate(id: "source", source: known(french), provider: providerA)
+    try await translate(id: "target", target: english, provider: providerA)
+    try await translate(id: "configuration", provider: providerB)
+    try await translate(id: "type", provider: alternateProviderA)
+    try await translate(id: "text", text: "Hello!", provider: providerA)
 
-    #expect(await recorder.snapshot().count == 6)
+    #expect(callCount.value == 7)
 }
 
-@Test func transportGroupsKnownAndAutomaticSourcesAndOrdersFreshResults() async throws {
-    let (client, recorder) = makeClient { requests, _, _ in
+@Test func clientPassesOneCompleteMixedSourceBatchAndOrdersFreshResults() async throws {
+    let (provider, recorder) = makeProvider { requests, _ in
         Array(successfulResults(for: requests).reversed())
     }
     let requests = [
@@ -328,22 +399,19 @@ private func endpoint(_ deploymentID: String = "deployment-A") throws -> GoogleA
     ]
 
     let batches = try await collect(
-        client.translations(
+        TranslationClient().translations(
             for: requests,
             to: japanese,
-            using: .googleAppsScript(try endpoint())
+            using: provider
         )
     )
     let calls = await recorder.snapshot()
 
     #expect(batches.count == 1)
     #expect(batches[0].map(\.requestID) == ["1", "2", "3", "4"])
-    #expect(calls.count == 3)
-    #expect(Set(calls.map(\.sourceLanguage)) == Set([known(english), known(french), .automatic]))
-    #expect(calls.allSatisfy { call in
-        call.targetLanguage == japanese
-            && call.requests.allSatisfy { $0.sourceLanguage == call.sourceLanguage }
-    })
+    #expect(calls.count == 1)
+    #expect(calls[0].requests.map(\.id) == ["1", "2", "3", "4"])
+    #expect(calls[0].targetLanguage == japanese)
 }
 
 private enum MembershipScenario: CaseIterable, Sendable {
@@ -367,31 +435,31 @@ private enum MembershipScenario: CaseIterable, Sendable {
 private func invalidFreshMembershipTerminatesBeforeReturningResults(
     scenario: MembershipScenario
 ) async throws {
-    let (client, _) = makeClient { requests, _, _ in
+    let (provider, _) = makeProvider { requests, _ in
         switch scenario {
         case .unknown:
             [
-                TranslationTransportResult(requestID: requests[0].id, translatedText: "one"),
-                TranslationTransportResult(requestID: "provider-token", translatedText: "unknown"),
+                TranslationResult(requestID: requests[0].id, translatedText: "one"),
+                TranslationResult(requestID: "provider-token", translatedText: "unknown"),
             ]
         case .duplicate:
             [
-                TranslationTransportResult(requestID: requests[0].id, translatedText: "one"),
-                TranslationTransportResult(requestID: requests[0].id, translatedText: "again"),
-                TranslationTransportResult(requestID: requests[1].id, translatedText: "two"),
+                TranslationResult(requestID: requests[0].id, translatedText: "one"),
+                TranslationResult(requestID: requests[0].id, translatedText: "again"),
+                TranslationResult(requestID: requests[1].id, translatedText: "two"),
             ]
         case .missing:
-            [TranslationTransportResult(requestID: requests[0].id, translatedText: "one")]
+            [TranslationResult(requestID: requests[0].id, translatedText: "one")]
         }
     }
     let error = await terminalError(
-        from: client.translations(
+        from: TranslationClient().translations(
             for: [
                 request(id: "private-first", text: "one"),
                 request(id: "private-second", text: "two"),
             ],
             to: japanese,
-            using: .googleAppsScript(try endpoint())
+            using: provider
         )
     )
 
@@ -403,14 +471,14 @@ private func invalidFreshMembershipTerminatesBeforeReturningResults(
 
 @Test func membershipFailureRollsBackBeforeCacheCommit() async throws {
     let attempt = CountProbe()
-    let (client, _) = makeClient { requests, _, _ in
+    let (provider, _) = makeProvider { requests, _ in
         attempt.increment()
         if attempt.value == 1 {
-            return [TranslationTransportResult(requestID: "unknown", translatedText: "invalid")]
+            return [TranslationResult(requestID: "unknown", translatedText: "invalid")]
         }
         return successfulResults(for: requests)
     }
-    let provider = TranslationProvider.googleAppsScript(try endpoint())
+    let client = TranslationClient()
 
     let firstError = await terminalError(
         from: client.translations(
@@ -435,18 +503,18 @@ private func invalidFreshMembershipTerminatesBeforeReturningResults(
     #expect(attempt.value == 2)
 }
 
-@Test func duplicateInputIdentifiersAreRedactedAndStopBeforeTransport() async throws {
-    let (client, recorder) = makeClient { requests, _, _ in
+@Test func duplicateInputIdentifiersAreRedactedAndStopBeforeProvider() async throws {
+    let (provider, recorder) = makeProvider { requests, _ in
         successfulResults(for: requests)
     }
     let error = await terminalError(
-        from: client.translations(
+        from: TranslationClient().translations(
             for: [
                 request(id: "private-duplicate", text: "one"),
                 request(id: "private-duplicate", text: "two"),
             ],
             to: japanese,
-            using: .googleAppsScript(try endpoint())
+            using: provider
         )
     )
 
@@ -456,23 +524,116 @@ private func invalidFreshMembershipTerminatesBeforeReturningResults(
     #expect(await recorder.snapshot().isEmpty)
 }
 
-private enum TestTransportError: Error {
+private enum TestProviderError: Error, Equatable {
     case unavailable
 }
 
-@Test func unknownTransportErrorsBecomePublicTerminalFailures() async throws {
-    let (client, _) = makeClient { _, _, _ in
-        throw TestTransportError.unavailable
+@Test func customProviderErrorsPropagateUnchanged() async throws {
+    let (provider, _) = makeProvider { _, _ in
+        throw TestProviderError.unavailable
     }
     let error = await terminalError(
-        from: client.translations(
+        from: TranslationClient().translations(
             for: [request(id: "1", text: "one")],
             to: japanese,
-            using: .googleAppsScript(try endpoint())
+            using: provider
         )
     )
 
-    #expect(error as? TranslationFailure == .transport)
+    #expect(error as? TestProviderError == .unavailable)
+}
+
+private final class DomainErrorCancellationProbe: Sendable {
+    private struct State {
+        var continuation: CheckedContinuation<Void, Never>?
+        var cancellationRequested = false
+        var started = false
+        var startedWaiters: [CheckedContinuation<Void, Never>] = []
+        var cleanupFinished = false
+    }
+
+    private let state = Mutex(State())
+
+    func run() async throws -> [TranslationResult] {
+        await withTaskCancellationHandler {
+            await withCheckedContinuation { continuation in
+                let (wasAlreadyCancelled, waiters) = state.withLock { state in
+                    state.started = true
+                    defer { state.startedWaiters.removeAll() }
+                    if state.cancellationRequested {
+                        return (true, state.startedWaiters)
+                    }
+                    state.continuation = continuation
+                    return (false, state.startedWaiters)
+                }
+                for waiter in waiters {
+                    waiter.resume()
+                }
+                if wasAlreadyCancelled {
+                    continuation.resume()
+                }
+            }
+        } onCancel: {
+            requestCancellation()
+        }
+
+        await Task.yield()
+        state.withLock { $0.cleanupFinished = true }
+        throw TestProviderError.unavailable
+    }
+
+    func waitUntilStarted() async {
+        await withCheckedContinuation { continuation in
+            let alreadyStarted = state.withLock { state in
+                guard !state.started else { return true }
+                state.startedWaiters.append(continuation)
+                return false
+            }
+            if alreadyStarted {
+                continuation.resume()
+            }
+        }
+    }
+
+    private func requestCancellation() {
+        let continuation = state.withLock { state in
+            state.cancellationRequested = true
+            defer { state.continuation = nil }
+            return state.continuation
+        }
+        continuation?.resume()
+    }
+
+    var didFinishCleanup: Bool {
+        state.withLock { $0.cleanupFinished }
+    }
+}
+
+@Test func cancelledProviderDomainErrorBecomesCancellationAfterCleanup() async throws {
+    let probe = DomainErrorCancellationProbe()
+    let (provider, _) = makeProvider { _, _ in
+        try await probe.run()
+    }
+    let task = Task {
+        try await collect(
+            TranslationClient().translations(
+                for: [request(id: "1", text: "one")],
+                to: japanese,
+                using: provider
+            )
+        )
+    }
+
+    await probe.waitUntilStarted()
+    task.cancel()
+
+    switch await task.result {
+    case .success:
+        Issue.record("Cancelled translation unexpectedly succeeded.")
+    case .failure(let error):
+        #expect(error is CancellationError)
+    }
+    #expect(probe.didFinishCleanup)
 }
 
 private final class CancellationProbe: Sendable {
@@ -489,18 +650,23 @@ private final class CancellationProbe: Sendable {
     private let state = Mutex(State())
 
     func waitForCancellationIfNeeded(id: String, firstPhaseCount: Int) async throws {
-        let shouldSuspend = state.withLock { state in
+        let result: (
+            shouldSuspend: Bool,
+            waiters: [(count: Int, continuation: CheckedContinuation<Void, Never>)]
+        ) = state.withLock { state in
             state.callCount += 1
-            if state.allowSuccess { return false }
-            state.startedCount += 1
-            let readyWaiters = state.startedWaiters.filter { $0.count <= state.startedCount }
-            state.startedWaiters.removeAll { $0.count <= state.startedCount }
-            for waiter in readyWaiters {
-                waiter.continuation.resume()
+            if state.allowSuccess {
+                return (false, [])
             }
-            return true
+            state.startedCount += 1
+            let waiters = state.startedWaiters.filter { $0.count <= state.startedCount }
+            state.startedWaiters.removeAll { $0.count <= state.startedCount }
+            return (true, waiters)
         }
-        guard shouldSuspend else { return }
+        for waiter in result.waiters {
+            waiter.continuation.resume()
+        }
+        guard result.shouldSuspend else { return }
 
         defer {
             state.withLock { state in
@@ -558,17 +724,39 @@ private final class CancellationProbe: Sendable {
     }
 }
 
-@Test func cancellationWaitsForChildTransportsAndDoesNotPopulateCache() async throws {
+@Test func cancellationAwaitsProviderQuiescenceAndDoesNotPopulateCache() async throws {
     let probe = CancellationProbe()
-    let finishCount = CountProbe()
-    let (client, _) = makeClient(
-        finish: { finishCount.increment() }
-    ) { requests, _, _ in
-        let operationID = try #require(requests.first?.id)
-        try await probe.waitForCancellationIfNeeded(id: operationID, firstPhaseCount: 2)
-        return successfulResults(for: requests)
+    let (provider, recorder) = makeProvider { requests, _ in
+        try await withThrowingTaskGroup(
+            of: TranslationResult.self,
+            returning: [TranslationResult].self
+        ) { group in
+            for request in requests {
+                group.addTask {
+                    try await probe.waitForCancellationIfNeeded(
+                        id: request.id,
+                        firstPhaseCount: 2
+                    )
+                    return TranslationResult(
+                        requestID: request.id,
+                        translatedText: "translated:\(request.text)"
+                    )
+                }
+            }
+
+            var results: [TranslationResult] = []
+            do {
+                for try await result in group {
+                    results.append(result)
+                }
+            } catch {
+                group.cancelAll()
+                throw error
+            }
+            return results
+        }
     }
-    let provider = TranslationProvider.googleAppsScript(try endpoint())
+    let client = TranslationClient()
     let firstRequests = [
         request(id: "first-en", text: "Hello"),
         request(id: "first-fr", text: "Bonjour", source: known(french)),
@@ -594,7 +782,6 @@ private final class CancellationProbe: Sendable {
         #expect(error is CancellationError)
     }
     #expect(probe.snapshot().finishedCount == 2)
-    #expect(finishCount.value == 1)
 
     let secondBatches = try await collect(
         client.translations(
@@ -608,29 +795,109 @@ private final class CancellationProbe: Sendable {
     )
     #expect(secondBatches.count == 1)
     #expect(probe.snapshot().callCount == 4)
-    #expect(finishCount.value == 2)
+    #expect(await recorder.snapshot().count == 2)
 }
 
-@Test func transportFinishRunsExactlyOnceForMembershipFailure() async throws {
-    let finishCount = CountProbe()
-    let (client, _) = makeClient(finish: { finishCount.increment() }) { _, _, _ in
-        [TranslationTransportResult(requestID: "unknown", translatedText: "invalid")]
+private final class PostProviderCancellationProbe: Sendable {
+    private struct State {
+        var callCount = 0
+        var firstCallStarted = false
+        var firstCallWaiters: [CheckedContinuation<Void, Never>] = []
+        var releaseFirstCall: CheckedContinuation<Void, Never>?
     }
-    _ = await terminalError(
-        from: client.translations(
-            for: [request(id: "expected", text: "Hello")],
+
+    private let state = Mutex(State())
+
+    func run(_ requests: [TranslationRequest]) async -> [TranslationResult] {
+        let isFirstCall = state.withLock { state in
+            state.callCount += 1
+            return state.callCount == 1
+        }
+        if isFirstCall {
+            await withCheckedContinuation { continuation in
+                let waiters = state.withLock { state in
+                    state.releaseFirstCall = continuation
+                    state.firstCallStarted = true
+                    defer { state.firstCallWaiters.removeAll() }
+                    return state.firstCallWaiters
+                }
+                for waiter in waiters {
+                    waiter.resume()
+                }
+            }
+        }
+        return successfulResults(for: requests)
+    }
+
+    func waitUntilFirstCallStarted() async {
+        await withCheckedContinuation { continuation in
+            let alreadyStarted = state.withLock { state in
+                guard !state.firstCallStarted else { return true }
+                state.firstCallWaiters.append(continuation)
+                return false
+            }
+            if alreadyStarted {
+                continuation.resume()
+            }
+        }
+    }
+
+    func release() {
+        let continuation = state.withLock { state in
+            defer { state.releaseFirstCall = nil }
+            return state.releaseFirstCall
+        }
+        continuation?.resume()
+    }
+
+    var callCount: Int {
+        state.withLock { $0.callCount }
+    }
+}
+
+@Test func providerSuccessAfterCancellationDoesNotReachCacheCommit() async throws {
+    let probe = PostProviderCancellationProbe()
+    let (provider, _) = makeProvider { requests, _ in
+        await probe.run(requests)
+    }
+    let client = TranslationClient()
+    let task = Task {
+        try await collect(
+            client.translations(
+                for: [request(id: "first", text: "Hello")],
+                to: japanese,
+                using: provider
+            )
+        )
+    }
+
+    await probe.waitUntilFirstCallStarted()
+    task.cancel()
+    probe.release()
+
+    switch await task.result {
+    case .success:
+        Issue.record("Cancelled translation unexpectedly reached the cache commit.")
+    case .failure(let error):
+        #expect(error is CancellationError)
+    }
+
+    let retry = try await collect(
+        client.translations(
+            for: [request(id: "second", text: "Hello")],
             to: japanese,
-            using: .googleAppsScript(try endpoint())
+            using: provider
         )
     )
-    #expect(finishCount.value == 1)
+    #expect(retry.flatMap { $0 }.map(\.requestID) == ["second"])
+    #expect(probe.callCount == 2)
 }
 
 @Test func concurrentOperationsShareCacheWithoutDataRaces() async throws {
-    let (client, recorder) = makeClient { requests, _, _ in
+    let (provider, recorder) = makeProvider { requests, _ in
         successfulResults(for: requests)
     }
-    let provider = TranslationProvider.googleAppsScript(try endpoint())
+    let client = TranslationClient()
 
     let resultCount = try await withThrowingTaskGroup(of: Int.self, returning: Int.self) { group in
         for index in 0..<32 {
@@ -657,32 +924,24 @@ private final class CancellationProbe: Sendable {
     #expect(await recorder.snapshot().count == 32)
 }
 
+private func cacheKey(_ text: String) -> TranslationCache.Key {
+    let (provider, _) = makeProvider(identity: "cache") { requests, _ in
+        successfulResults(for: requests)
+    }
+    return TranslationCache.Key(
+        text: text,
+        sourceLanguage: known(english),
+        targetLanguage: japanese,
+        provider: AnyTranslationProvider(provider)
+    )
+}
+
 @Test func oversizedCacheStoreRetainsOnlyNewestUniqueEntries() async throws {
     let cache = TranslationCache(countLimit: 3)
-    let first = TranslationCache.Key(
-        text: "first",
-        sourceLanguage: known(english),
-        targetLanguage: japanese,
-        provider: .googleAppsScript(try endpoint())
-    )
-    let second = TranslationCache.Key(
-        text: "second",
-        sourceLanguage: known(english),
-        targetLanguage: japanese,
-        provider: .googleAppsScript(try endpoint())
-    )
-    let third = TranslationCache.Key(
-        text: "third",
-        sourceLanguage: known(english),
-        targetLanguage: japanese,
-        provider: .googleAppsScript(try endpoint())
-    )
-    let fourth = TranslationCache.Key(
-        text: "fourth",
-        sourceLanguage: known(english),
-        targetLanguage: japanese,
-        provider: .googleAppsScript(try endpoint())
-    )
+    let first = cacheKey("first")
+    let second = cacheKey("second")
+    let third = cacheKey("third")
+    let fourth = cacheKey("fourth")
 
     try await cache.store([
         (first, "obsolete-first"),
@@ -701,15 +960,7 @@ private final class CancellationProbe: Sendable {
 
 @Test func smallCacheStoreMergesWithExistingRecency() async throws {
     let cache = TranslationCache(countLimit: 3)
-    let provider = TranslationProvider.googleAppsScript(try endpoint())
-    let keys = ["first", "second", "third", "fourth"].map { text in
-        TranslationCache.Key(
-            text: text,
-            sourceLanguage: known(english),
-            targetLanguage: japanese,
-            provider: provider
-        )
-    }
+    let keys = ["first", "second", "third", "fourth"].map(cacheKey)
 
     try await cache.store([
         (keys[0], "first"),
@@ -724,392 +975,6 @@ private final class CancellationProbe: Sendable {
     #expect(values[keys[1]] == nil)
     #expect(values[keys[2]] == "third")
     #expect(values[keys[3]] == "fourth")
-}
-
-private enum StubDisposition: Sendable {
-    case response(statusCode: Int, data: Data)
-    case pending(URLProtocolProbe)
-}
-
-private final class URLProtocolRouter: Sendable {
-    typealias Handler = @Sendable (URLRequest) -> StubDisposition
-
-    static let shared = URLProtocolRouter()
-
-    private let routes = Mutex<[URL: Handler]>([:])
-
-    func install(url: URL, handler: @escaping Handler) {
-        routes.withLock { routes in
-            precondition(routes.updateValue(handler, forKey: url) == nil)
-        }
-    }
-
-    func remove(url: URL) {
-        routes.withLock { routes in
-            precondition(routes.removeValue(forKey: url) != nil)
-        }
-    }
-
-    func disposition(for request: URLRequest) -> StubDisposition? {
-        guard let url = request.url else { return nil }
-        return routes.withLock { $0[url] }?(request)
-    }
-}
-
-private final class StubURLProtocol: URLProtocol {
-    private let pendingProbe = Mutex<URLProtocolProbe?>(nil)
-
-    override class func canInit(with request: URLRequest) -> Bool {
-        true
-    }
-
-    override class func canonicalRequest(for request: URLRequest) -> URLRequest {
-        request
-    }
-
-    override func startLoading() {
-        guard let disposition = URLProtocolRouter.shared.disposition(for: request) else {
-            client?.urlProtocol(self, didFailWithError: URLError(.unsupportedURL))
-            return
-        }
-
-        switch disposition {
-        case .response(let statusCode, let data):
-            guard let url = request.url,
-                  let response = HTTPURLResponse(
-                    url: url,
-                    statusCode: statusCode,
-                    httpVersion: "HTTP/1.1",
-                    headerFields: ["Content-Type": "application/json"]
-                  ) else {
-                client?.urlProtocol(self, didFailWithError: URLError(.badServerResponse))
-                return
-            }
-            client?.urlProtocol(self, didReceive: response, cacheStoragePolicy: .notAllowed)
-            client?.urlProtocol(self, didLoad: data)
-            client?.urlProtocolDidFinishLoading(self)
-        case .pending(let probe):
-            pendingProbe.withLock { storedProbe in
-                precondition(storedProbe == nil)
-                storedProbe = probe
-            }
-            probe.didStart()
-        }
-    }
-
-    override func stopLoading() {
-        let probe = pendingProbe.withLock { storedProbe in
-            defer { storedProbe = nil }
-            return storedProbe
-        }
-        probe?.didStop()
-    }
-}
-
-private final class URLProtocolProbe: Sendable {
-    private struct State {
-        var started = 0
-        var stopped = 0
-        var startWaiters: [(Int, CheckedContinuation<Void, Never>)] = []
-        var stopWaiters: [(Int, CheckedContinuation<Void, Never>)] = []
-    }
-
-    private let state = Mutex(State())
-
-    func didStart() {
-        let waiters = state.withLock { state in
-            state.started += 1
-            let waiters = state.startWaiters.filter { $0.0 <= state.started }
-            state.startWaiters.removeAll { $0.0 <= state.started }
-            return waiters
-        }
-        for waiter in waiters {
-            waiter.1.resume()
-        }
-    }
-
-    func didStop() {
-        let waiters = state.withLock { state in
-            state.stopped += 1
-            let waiters = state.stopWaiters.filter { $0.0 <= state.stopped }
-            state.stopWaiters.removeAll { $0.0 <= state.stopped }
-            return waiters
-        }
-        for waiter in waiters {
-            waiter.1.resume()
-        }
-    }
-
-    func waitUntilStarted(_ count: Int) async {
-        await withCheckedContinuation { continuation in
-            let alreadyStarted = state.withLock { state in
-                guard state.started < count else { return true }
-                state.startWaiters.append((count, continuation))
-                return false
-            }
-            if alreadyStarted {
-                continuation.resume()
-            }
-        }
-    }
-
-    func waitUntilStopped(_ count: Int) async {
-        await withCheckedContinuation { continuation in
-            let alreadyStopped = state.withLock { state in
-                guard state.stopped < count else { return true }
-                state.stopWaiters.append((count, continuation))
-                return false
-            }
-            if alreadyStopped {
-                continuation.resume()
-            }
-        }
-    }
-
-    var snapshot: (started: Int, stopped: Int) {
-        state.withLock { ($0.started, $0.stopped) }
-    }
-}
-
-private final class PayloadProbe: Sendable {
-    private let payloads = Mutex<[Data]>([])
-
-    func append(_ data: Data) {
-        payloads.withLock { $0.append(data) }
-    }
-
-    var snapshot: [Data] {
-        payloads.withLock { $0 }
-    }
-}
-
-private final class SessionFactoryProbe: Sendable {
-    private let count = Mutex(0)
-
-    func makeConfiguration() -> URLSessionConfiguration {
-        count.withLock { $0 += 1 }
-        let configuration = URLSessionConfiguration.ephemeral
-        configuration.urlCache = nil
-        configuration.httpCookieStorage = nil
-        configuration.urlCredentialStorage = nil
-        configuration.httpShouldSetCookies = false
-        configuration.requestCachePolicy = .reloadIgnoringLocalCacheData
-        configuration.protocolClasses = [StubURLProtocol.self]
-        return configuration
-    }
-
-    var createdCount: Int {
-        count.withLock { $0 }
-    }
-}
-
-private func makeGoogleClient(
-    sessionFactory: SessionFactoryProbe
-) -> TranslationClient {
-    TranslationClient(
-        transportFactory: TranslationTransportFactory { provider in
-            guard case .googleAppsScript(let endpoint) = provider.storage else {
-                preconditionFailure("The test expects the Google Apps Script provider.")
-            }
-            return GoogleAppsScriptTransport(
-                endpoint: endpoint,
-                sessionFactory: GoogleAppsScriptSessionFactory {
-                    sessionFactory.makeConfiguration()
-                }
-            ).transport
-        }
-    )
-}
-
-private func googleResponse(for request: URLRequest, payloadProbe: PayloadProbe? = nil) -> Data {
-    guard let body = requestBodyData(request),
-          let object = try? JSONSerialization.jsonObject(with: body) as? [String: Any],
-          let tweets = object["tweets"] as? [[String: Any]] else {
-        return Data(#"{"invalid":true}"#.utf8)
-    }
-    payloadProbe?.append(body)
-    let rows = tweets.compactMap { tweet -> [String]? in
-        guard let token = tweet["tweetId"] as? String,
-              let text = tweet["text"] as? String else {
-            return nil
-        }
-        return [token, "translated:\(text)"]
-    }
-    return (try? JSONSerialization.data(withJSONObject: rows)) ?? Data()
-}
-
-private func requestBodyData(_ request: URLRequest) -> Data? {
-    if let body = request.httpBody {
-        return body
-    }
-    guard let stream = request.httpBodyStream else { return nil }
-
-    stream.open()
-    defer { stream.close() }
-    var data = Data()
-    let buffer = UnsafeMutablePointer<UInt8>.allocate(capacity: 4_096)
-    defer { unsafe buffer.deallocate() }
-    while stream.hasBytesAvailable {
-        let count = unsafe stream.read(buffer, maxLength: 4_096)
-        guard count >= 0 else { return nil }
-        if count == 0 { break }
-        unsafe data.append(buffer, count: count)
-    }
-    return data
-}
-
-@Test func liveGoogleSessionConfigurationIsEphemeralAndStateless() async {
-    let session = GoogleAppsScriptSessionFactory.live.makeSession()
-    let configuration = session.configuration
-
-    #expect(configuration.urlCache == nil)
-    #expect(configuration.httpCookieStorage == nil)
-    #expect(configuration.urlCredentialStorage == nil)
-    #expect(configuration.httpShouldSetCookies == false)
-    #expect(configuration.requestCachePolicy == .reloadIgnoringLocalCacheData)
-    await session.finish()
-}
-
-@Test func googleTransportUsesOpaqueTokensAndAutomaticSourceWireValue() async throws {
-    let endpoint = try endpoint("opaque-token-contract")
-    let payloadProbe = PayloadProbe()
-    URLProtocolRouter.shared.install(url: endpoint.url) { request in
-        .response(statusCode: 200, data: googleResponse(for: request, payloadProbe: payloadProbe))
-    }
-    defer { URLProtocolRouter.shared.remove(url: endpoint.url) }
-
-    let sessionFactory = SessionFactoryProbe()
-    let client = makeGoogleClient(sessionFactory: sessionFactory)
-    let batches = try await collect(
-        client.translations(
-            for: [request(id: "raw-private-id", text: "Bonjour", source: .automatic)],
-            to: english,
-            using: .googleAppsScript(endpoint)
-        )
-    )
-
-    #expect(batches.flatMap { $0 }.map(\.requestID) == ["raw-private-id"])
-    let payload = try #require(payloadProbe.snapshot.first)
-    let object = try #require(JSONSerialization.jsonObject(with: payload) as? [String: Any])
-    let tweets = try #require(object["tweets"] as? [[String: Any]])
-    let token = try #require(tweets.first?["tweetId"] as? String)
-    #expect(token != "raw-private-id")
-    #expect(UUID(uuidString: token) != nil)
-    #expect(object["sourceLang"] as? String == "")
-    #expect(object["targetLang"] as? String == "en")
-    #expect(sessionFactory.createdCount == 1)
-}
-
-@Test func googleTransportSharesOneSessionAcrossKnownSourceGroups() async throws {
-    let endpoint = try endpoint("one-session-contract")
-    let payloadProbe = PayloadProbe()
-    URLProtocolRouter.shared.install(url: endpoint.url) { request in
-        .response(statusCode: 200, data: googleResponse(for: request, payloadProbe: payloadProbe))
-    }
-    defer { URLProtocolRouter.shared.remove(url: endpoint.url) }
-
-    let sessionFactory = SessionFactoryProbe()
-    let client = makeGoogleClient(sessionFactory: sessionFactory)
-    _ = try await collect(
-        client.translations(
-            for: [
-                request(id: "english", text: "Hello"),
-                request(id: "french", text: "Bonjour", source: known(french)),
-                request(id: "automatic", text: "Unknown", source: .automatic),
-            ],
-            to: japanese,
-            using: .googleAppsScript(endpoint)
-        )
-    )
-
-    let sourceIdentifiers = try payloadProbe.snapshot.map { payload -> String in
-        let object = try #require(JSONSerialization.jsonObject(with: payload) as? [String: Any])
-        return try #require(object["sourceLang"] as? String)
-    }
-    #expect(Set(sourceIdentifiers) == Set(["en", "fr", ""]))
-    #expect(sessionFactory.createdCount == 1)
-}
-
-@Test func googleTransportMapsHTTPStatusAndMalformedMembership() async throws {
-    let statusEndpoint = try endpoint("status-contract")
-    URLProtocolRouter.shared.install(url: statusEndpoint.url) { _ in
-        .response(statusCode: 503, data: Data())
-    }
-    defer { URLProtocolRouter.shared.remove(url: statusEndpoint.url) }
-
-    let statusClient = makeGoogleClient(sessionFactory: SessionFactoryProbe())
-    let statusError = await terminalError(
-        from: statusClient.translations(
-            for: [request(id: "private-status", text: "Hello")],
-            to: japanese,
-            using: .googleAppsScript(statusEndpoint)
-        )
-    )
-    #expect(statusError as? TranslationFailure == .serverRejected(statusCode: 503))
-
-    let membershipEndpoint = try endpoint("membership-contract")
-    URLProtocolRouter.shared.install(url: membershipEndpoint.url) { _ in
-        .response(
-            statusCode: 200,
-            data: Data(#"[["outside-token","translated"]]"#.utf8)
-        )
-    }
-    defer { URLProtocolRouter.shared.remove(url: membershipEndpoint.url) }
-
-    let membershipClient = makeGoogleClient(sessionFactory: SessionFactoryProbe())
-    let membershipError = await terminalError(
-        from: membershipClient.translations(
-            for: [request(id: "private-membership", text: "Hello")],
-            to: japanese,
-            using: .googleAppsScript(membershipEndpoint)
-        )
-    )
-    let membershipFailure = try #require(membershipError as? TranslationFailure)
-    #expect(
-        membershipFailure
-            == .invalidResponseMembership(.unknownIdentifiers(count: 1))
-    )
-    #expect(!(membershipFailure.errorDescription ?? "").contains("outside-token"))
-    #expect(!(membershipFailure.errorDescription ?? "").contains("private-membership"))
-}
-
-@Test(arguments: 0..<16)
-func googleCancellationCancelsEveryURLProtocolTask(iteration: Int) async throws {
-    let endpoint = try endpoint("cancellation-contract-\(iteration)")
-    let protocolProbe = URLProtocolProbe()
-    URLProtocolRouter.shared.install(url: endpoint.url) { _ in
-        .pending(protocolProbe)
-    }
-    defer { URLProtocolRouter.shared.remove(url: endpoint.url) }
-
-    let sessionFactory = SessionFactoryProbe()
-    let client = makeGoogleClient(sessionFactory: sessionFactory)
-    let task = Task {
-        try await collect(
-            client.translations(
-                for: [
-                    request(id: "first", text: "Hello"),
-                    request(id: "second", text: "Bonjour", source: known(french)),
-                ],
-                to: japanese,
-                using: .googleAppsScript(endpoint)
-            )
-        )
-    }
-
-    await protocolProbe.waitUntilStarted(2)
-    task.cancel()
-    let result = await task.result
-    switch result {
-    case .success:
-        Issue.record("Cancelled URLSession operation unexpectedly succeeded.")
-    case .failure(let error):
-        #expect(error is CancellationError)
-    }
-    await protocolProbe.waitUntilStopped(2)
-    #expect(protocolProbe.snapshot.started == 2)
-    #expect(protocolProbe.snapshot.stopped == 2)
-    #expect(sessionFactory.createdCount == 1)
 }
 
 @available(iOS 26.0, macOS 26.0, *)
@@ -1150,7 +1015,7 @@ private enum OnDeviceErrorScenario: CaseIterable, Sendable {
 @available(iOS 26.0, macOS 26.0, *)
 @Test(arguments: OnDeviceErrorScenario.allCases)
 private func onDeviceMapsEveryTranslationError(scenario: OnDeviceErrorScenario) async throws {
-    let transport = OnDeviceTranslationTransport(
+    let provider = OnDeviceTranslationProvider(
         driverFactory: OnDeviceTranslationDriverFactory { _, _ in
             OnDeviceTranslationDriver(
                 translate: { _ in throw scenario.error },
@@ -1160,10 +1025,9 @@ private func onDeviceMapsEveryTranslationError(scenario: OnDeviceErrorScenario) 
     )
 
     do {
-        _ = try await transport.translate(
-            requests: [request(id: "1", text: "Hello")],
-            sourceLanguage: known(english),
-            targetLanguage: japanese
+        _ = try await provider.translate(
+            [request(id: "1", text: "Hello")],
+            to: japanese
         )
         Issue.record("Expected on-device translation to fail.")
     } catch let failure as TranslationFailure {
@@ -1172,9 +1036,9 @@ private func onDeviceMapsEveryTranslationError(scenario: OnDeviceErrorScenario) 
 }
 
 @available(iOS 26.0, macOS 26.0, *)
-@Test func onDeviceRejectsAutomaticSourceBeforeCreatingSessionDriver() async throws {
+@Test func onDevicePreflightsAutomaticSourcesBeforeCreatingAnyDriver() async throws {
     let driverCount = CountProbe()
-    let transport = OnDeviceTranslationTransport(
+    let provider = OnDeviceTranslationProvider(
         driverFactory: OnDeviceTranslationDriverFactory { _, _ in
             driverCount.increment()
             return OnDeviceTranslationDriver(
@@ -1185,10 +1049,12 @@ private func onDeviceMapsEveryTranslationError(scenario: OnDeviceErrorScenario) 
     )
 
     do {
-        _ = try await transport.translate(
-            requests: [request(id: "1", text: "Hello", source: .automatic)],
-            sourceLanguage: .automatic,
-            targetLanguage: japanese
+        _ = try await provider.translate(
+            [
+                request(id: "known", text: "Hello"),
+                request(id: "automatic", text: "Bonjour", source: .automatic),
+            ],
+            to: japanese
         )
         Issue.record("Expected automatic source policy to be rejected.")
     } catch let failure as TranslationFailure {
@@ -1198,74 +1064,163 @@ private func onDeviceMapsEveryTranslationError(scenario: OnDeviceErrorScenario) 
 }
 
 @available(iOS 26.0, macOS 26.0, *)
-@Test func mixedOnDeviceSourcesFailBeforeResolvingTransport() async throws {
-    let transportCount = CountProbe()
-    let client = TranslationClient(
-        transportFactory: TranslationTransportFactory { _ in
-            transportCount.increment()
-            return TranslationTransport(translate: { requests, _, _ in
-                successfulResults(for: requests)
-            })
-        }
-    )
-    let error = await terminalError(
-        from: client.translations(
-            for: [
-                request(id: "known", text: "Hello"),
-                request(id: "automatic", text: "Bonjour", source: .automatic),
-            ],
-            to: japanese,
-            using: .onDevice
-        )
-    )
+private final class OnDeviceGroupingProbe: Sendable {
+    struct Call: Sendable {
+        let sourceLanguage: TranslationLanguage
+        let targetLanguage: TranslationLanguage
+        let requests: [TranslationRequest]
+    }
 
-    #expect(error as? TranslationFailure == .automaticSourceLanguageUnavailable)
-    #expect(transportCount.value == 0)
+    private let calls = Mutex<[Call]>([])
+
+    func makeDriver(
+        sourceLanguage: TranslationLanguage,
+        targetLanguage: TranslationLanguage
+    ) -> OnDeviceTranslationDriver {
+        OnDeviceTranslationDriver(
+            translate: { requests in
+                self.calls.withLock {
+                    $0.append(
+                        Call(
+                            sourceLanguage: sourceLanguage,
+                            targetLanguage: targetLanguage,
+                            requests: requests
+                        )
+                    )
+                }
+                return Array(successfulResults(for: requests).reversed())
+            },
+            cancel: {}
+        )
+    }
+
+    var snapshot: [Call] {
+        calls.withLock { $0 }
+    }
 }
 
-private final class OnDeviceCancellationProbe: Sendable {
+@available(iOS 26.0, macOS 26.0, *)
+@Test func onDeviceGroupsExplicitSourcesInternallyAndClientOrdersResults() async throws {
+    let probe = OnDeviceGroupingProbe()
+    let provider = OnDeviceTranslationProvider(
+        driverFactory: OnDeviceTranslationDriverFactory { source, target in
+            probe.makeDriver(sourceLanguage: source, targetLanguage: target)
+        }
+    )
+    let requests = [
+        request(id: "english-1", text: "Hello"),
+        request(id: "french", text: "Bonjour", source: known(french)),
+        request(id: "english-2", text: "Welcome"),
+    ]
+
+    let batches = try await collect(
+        TranslationClient().translations(
+            for: requests,
+            to: japanese,
+            using: provider
+        )
+    )
+    let calls = probe.snapshot
+
+    #expect(batches.flatMap { $0 }.map(\.requestID) == requests.map(\.id))
+    #expect(calls.count == 2)
+    #expect(Set(calls.map(\.sourceLanguage)) == Set([english, french]))
+    #expect(calls.allSatisfy { $0.targetLanguage == japanese })
+    #expect(calls.allSatisfy { call in
+        call.requests.allSatisfy {
+            $0.sourceLanguage == .language(call.sourceLanguage)
+        }
+    })
+}
+
+@available(iOS 26.0, macOS 26.0, *)
+@Test func onDeviceRejectsIdentifiersCrossingSourceGroups() async throws {
+    let provider = OnDeviceTranslationProvider(
+        driverFactory: OnDeviceTranslationDriverFactory { source, _ in
+            OnDeviceTranslationDriver(
+                translate: { _ in
+                    let requestID = source == english ? "french" : "english"
+                    return [
+                        TranslationResult(
+                            requestID: requestID,
+                            translatedText: "wrong-source"
+                        ),
+                    ]
+                },
+                cancel: {}
+            )
+        }
+    )
+
+    do {
+        _ = try await provider.translate(
+            [
+                request(id: "english", text: "Hello"),
+                request(id: "french", text: "Bonjour", source: known(french)),
+            ],
+            to: japanese
+        )
+        Issue.record("Expected cross-source identifiers to be rejected.")
+    } catch let failure as TranslationFailure {
+        #expect(
+            failure
+                == .invalidResponseMembership(.unknownIdentifiers(count: 1))
+        )
+    }
+}
+
+private final class OnDeviceSiblingFailureProbe: Sendable {
     private struct State {
-        var continuation: CheckedContinuation<Void, any Error>?
-        var startedWaiter: CheckedContinuation<Void, Never>?
-        var started = false
+        var waitingDriverEntered = false
+        var entryGate: CheckedContinuation<Void, Never>?
+        var entryWaiters: [CheckedContinuation<Void, Never>] = []
+        var cancellationRequested = false
         var cancellationFinished = false
     }
 
     private let state = Mutex(State())
 
-    func translate() async throws {
-        try await withCheckedThrowingContinuation { continuation in
-            let waiter = state.withLock { state in
-                state.continuation = continuation
-                state.started = true
-                defer { state.startedWaiter = nil }
-                return state.startedWaiter
-            }
-            waiter?.resume()
-        }
-    }
-
-    func cancel() async {
-        let continuation = state.withLock { state in
-            defer { state.continuation = nil }
-            return state.continuation
-        }
-        continuation?.resume(throwing: CancellationError())
-        await Task.yield()
-        state.withLock { $0.cancellationFinished = true }
-    }
-
-    func waitUntilStarted() async {
+    func runWaitingDriver() async throws {
         await withCheckedContinuation { continuation in
-            let alreadyStarted = state.withLock { state in
-                guard !state.started else { return true }
-                state.startedWaiter = continuation
+            let waiters = state.withLock { state in
+                precondition(state.entryGate == nil)
+                state.entryGate = continuation
+                state.waitingDriverEntered = true
+                defer { state.entryWaiters.removeAll() }
+                return state.entryWaiters
+            }
+            for waiter in waiters {
+                waiter.resume()
+            }
+        }
+
+        let cancellationWasRequested = state.withLock { $0.cancellationRequested }
+        precondition(cancellationWasRequested)
+        throw CancellationError()
+    }
+
+    func waitUntilWaitingDriverEntered() async {
+        await withCheckedContinuation { continuation in
+            let alreadyEntered = state.withLock { state in
+                guard !state.waitingDriverEntered else { return true }
+                state.entryWaiters.append(continuation)
                 return false
             }
-            if alreadyStarted {
+            if alreadyEntered {
                 continuation.resume()
             }
         }
+    }
+
+    func cancelWaitingDriver() async {
+        let gate = state.withLock { state in
+            state.cancellationRequested = true
+            defer { state.entryGate = nil }
+            return state.entryGate
+        }
+        gate?.resume()
+        await Task.yield()
+        state.withLock { $0.cancellationFinished = true }
     }
 
     var didFinishCancellation: Bool {
@@ -1274,37 +1229,151 @@ private final class OnDeviceCancellationProbe: Sendable {
 }
 
 @available(iOS 26.0, macOS 26.0, *)
-@Test func onDeviceCancellationAwaitsSessionDriverCancellation() async throws {
-    let probe = OnDeviceCancellationProbe()
-    let transport = OnDeviceTranslationTransport(
-        driverFactory: OnDeviceTranslationDriverFactory { _, _ in
-            OnDeviceTranslationDriver(
+@Test func onDeviceSiblingFailureAwaitsCancellationBeforeThrowing() async throws {
+    let probe = OnDeviceSiblingFailureProbe()
+    let provider = OnDeviceTranslationProvider(
+        driverFactory: OnDeviceTranslationDriverFactory { source, _ in
+            if source == english {
+                return OnDeviceTranslationDriver(
+                    translate: { _ in
+                        try await probe.runWaitingDriver()
+                        return []
+                    },
+                    cancel: {
+                        await probe.cancelWaitingDriver()
+                    }
+                )
+            }
+            return OnDeviceTranslationDriver(
                 translate: { _ in
-                    try await probe.translate()
-                    return []
+                    await probe.waitUntilWaitingDriverEntered()
+                    throw TranslationError.unsupportedTargetLanguage
+                },
+                cancel: {}
+            )
+        }
+    )
+
+    do {
+        _ = try await provider.translate(
+            [
+                request(id: "english", text: "Hello"),
+                request(id: "french", text: "Bonjour", source: known(french)),
+            ],
+            to: japanese
+        )
+        Issue.record("Expected one source driver to fail.")
+    } catch let failure as TranslationFailure {
+        #expect(failure == .unsupportedTargetLanguage)
+    }
+    #expect(probe.didFinishCancellation)
+}
+
+private final class OnDeviceCancellationProbe: Sendable {
+    private struct State {
+        var continuations: [String: CheckedContinuation<Void, any Error>] = [:]
+        var cancelledBeforeStart: Set<String> = []
+        var started: Set<String> = []
+        var cancellationFinished: Set<String> = []
+        var startedWaiters: [(Int, CheckedContinuation<Void, Never>)] = []
+    }
+
+    private let state = Mutex(State())
+
+    func translate(id: String) async throws {
+        try await withCheckedThrowingContinuation { continuation in
+            let (wasAlreadyCancelled, waiters) = state.withLock { state in
+                state.started.insert(id)
+                let waiters = state.startedWaiters.filter { $0.0 <= state.started.count }
+                state.startedWaiters.removeAll { $0.0 <= state.started.count }
+                if state.cancelledBeforeStart.remove(id) != nil {
+                    return (true, waiters)
+                }
+                state.continuations[id] = continuation
+                return (false, waiters)
+            }
+            for waiter in waiters {
+                waiter.1.resume()
+            }
+            if wasAlreadyCancelled {
+                continuation.resume(throwing: CancellationError())
+            }
+        }
+    }
+
+    func cancel(id: String) async {
+        let continuation: CheckedContinuation<Void, any Error>? = state.withLock { state in
+            guard let continuation = state.continuations.removeValue(forKey: id) else {
+                state.cancelledBeforeStart.insert(id)
+                return nil
+            }
+            return continuation
+        }
+        continuation?.resume(throwing: CancellationError())
+        await Task.yield()
+        state.withLock { state in
+            _ = state.cancellationFinished.insert(id)
+        }
+    }
+
+    func waitUntilStarted(count: Int) async {
+        await withCheckedContinuation { continuation in
+            let alreadyStarted = state.withLock { state in
+                guard state.started.count < count else { return true }
+                state.startedWaiters.append((count, continuation))
+                return false
+            }
+            if alreadyStarted {
+                continuation.resume()
+            }
+        }
+    }
+
+    var finishedCancellationCount: Int {
+        state.withLock { $0.cancellationFinished.count }
+    }
+}
+
+@available(iOS 26.0, macOS 26.0, *)
+@Test(arguments: 0..<16)
+func onDeviceCancellationAwaitsEverySourceDriver(iteration: Int) async throws {
+    let probe = OnDeviceCancellationProbe()
+    let provider = OnDeviceTranslationProvider(
+        driverFactory: OnDeviceTranslationDriverFactory { source, _ in
+            OnDeviceTranslationDriver(
+                translate: { requests in
+                    try await probe.translate(id: source.identifier)
+                    return successfulResults(for: requests)
                 },
                 cancel: {
-                    await probe.cancel()
+                    await probe.cancel(id: source.identifier)
                 }
             )
         }
     )
     let task = Task {
-        try await transport.translate(
-            requests: [request(id: "1", text: "Hello")],
-            sourceLanguage: known(english),
-            targetLanguage: japanese
+        try await provider.translate(
+            [
+                request(id: "english-\(iteration)", text: "Hello"),
+                request(
+                    id: "french-\(iteration)",
+                    text: "Bonjour",
+                    source: known(french)
+                ),
+            ],
+            to: japanese
         )
     }
 
-    await probe.waitUntilStarted()
+    await probe.waitUntilStarted(count: 2)
     task.cancel()
     let result = await task.result
+
     switch result {
     case .success:
         Issue.record("Cancelled on-device translation unexpectedly succeeded.")
     case .failure(let error):
         #expect(error is CancellationError)
     }
-    #expect(probe.didFinishCancellation)
+    #expect(probe.finishedCancellationCount == 2)
 }

@@ -11,22 +11,19 @@ struct TranslationOperation: Sendable {
 
     private let requests: [TranslationRequest]
     private let targetLanguage: TranslationLanguage
-    private let provider: TranslationProvider
+    private let provider: AnyTranslationProvider
     private let cache: TranslationCache
-    private let transportFactory: TranslationTransportFactory
 
     init(
         requests: [TranslationRequest],
         targetLanguage: TranslationLanguage,
-        provider: TranslationProvider,
-        cache: TranslationCache,
-        transportFactory: TranslationTransportFactory
+        provider: AnyTranslationProvider,
+        cache: TranslationCache
     ) {
         self.requests = requests
         self.targetLanguage = targetLanguage
         self.provider = provider
         self.cache = cache
-        self.transportFactory = transportFactory
     }
 
     func prepare() async throws -> Prepared {
@@ -67,91 +64,42 @@ struct TranslationOperation: Sendable {
     }
 
     func translate(_ misses: [Miss]) async throws -> [TranslationResult] {
+        try Task.checkCancellation()
+        let unorderedResults: [TranslationResult]
         do {
-            try Task.checkCancellation()
-            try provider.validate(
-                sourceLanguages: misses.map(\.request.sourceLanguage)
+            unorderedResults = try await provider.translate(
+                misses.map(\.request),
+                to: targetLanguage
             )
-            let transport = transportFactory.transport(provider)
-            let groups = Dictionary(grouping: misses, by: { $0.request.sourceLanguage })
-
-            let unorderedResults: [TranslationTransportResult]
-            do {
-                unorderedResults = try await withThrowingTaskGroup(
-                    of: [TranslationTransportResult].self,
-                    returning: [TranslationTransportResult].self
-                ) { group in
-                    for (sourceLanguage, groupMisses) in groups {
-                        group.addTask {
-                            let groupRequests = groupMisses.map(\.request)
-                            let results = try await transport.translate(
-                                groupRequests,
-                                sourceLanguage,
-                                targetLanguage
-                            )
-                            try Task.checkCancellation()
-                            _ = try TranslationResponseMembership.validateAndOrder(
-                                results,
-                                expectedIdentifiers: groupRequests.map(\.id)
-                            )
-                            return results
-                        }
-                    }
-
-                    var results: [TranslationTransportResult] = []
-                    results.reserveCapacity(misses.count)
-                    do {
-                        for try await groupResults in group {
-                            results.append(contentsOf: groupResults)
-                        }
-                    } catch {
-                        group.cancelAll()
-                        throw error
-                    }
-                    return results
-                }
-            } catch {
-                await transport.finish()
-                throw error
-            }
-            await transport.finish()
-
-            try Task.checkCancellation()
-            let orderedResults = try TranslationResponseMembership.validateAndOrder(
-                unorderedResults,
-                expectedIdentifiers: misses.map(\.request.id)
-            )
-            let keysByRequestID = Dictionary(
-                uniqueKeysWithValues: misses.map { ($0.request.id, $0.cacheKey) }
-            )
-            let cacheValues = orderedResults.map { result in
-                guard let key = keysByRequestID[result.requestID] else {
-                    preconditionFailure("Validated results must have an originating cache key.")
-                }
-                return (key: key, translatedText: result.translatedText)
-            }
-            let results = orderedResults.map {
-                TranslationResult(
-                    requestID: $0.requestID,
-                    translatedText: $0.translatedText
-                )
-            }
-
-            // This cache write is the operation's commit point. Do not observe cancellation after
-            // it: reporting cancellation after committed results would make cancellation semantics
-            // disagree with the cache state.
-            try await cache.store(cacheValues)
-            return results
         } catch is CancellationError {
             throw CancellationError()
-        } catch let failure as TranslationFailure {
-            throw failure
         } catch {
-            if Task.isCancelled {
+            guard !Task.isCancelled else {
                 throw CancellationError()
             }
-            throw TranslationFailure.transport
+            throw error
         }
+
+        try Task.checkCancellation()
+        let orderedResults = try TranslationResponseMembership.validateAndOrder(
+            unorderedResults,
+            expectedIdentifiers: misses.map(\.request.id)
+        )
+        let keysByRequestID = Dictionary(
+            uniqueKeysWithValues: misses.map { ($0.request.id, $0.cacheKey) }
+        )
+        let cacheValues = orderedResults.map { result in
+            guard let key = keysByRequestID[result.requestID] else {
+                preconditionFailure("Validated results must have an originating cache key.")
+            }
+            return (key: key, translatedText: result.translatedText)
+        }
+
+        // This cache write is the operation's commit point. Do not observe cancellation after
+        // it: reporting cancellation after committed results would make cancellation semantics
+        // disagree with the cache state.
+        try await cache.store(cacheValues)
+        return orderedResults
     }
 
     private static func validateUniqueRequestIDs(_ requests: [TranslationRequest]) throws {

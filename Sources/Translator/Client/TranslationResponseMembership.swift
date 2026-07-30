@@ -1,8 +1,8 @@
 enum TranslationResponseMembership {
     static func validateAndOrder(
-        _ results: [TranslationTransportResult],
+        _ results: [TranslationResult],
         expectedIdentifiers: [String]
-    ) throws -> [TranslationTransportResult] {
+    ) throws -> [TranslationResult] {
         let expectedIdentifierSet = Set(expectedIdentifiers)
         let unknownCount = results.count { !expectedIdentifierSet.contains($0.requestID) }
         guard unknownCount == 0 else {
@@ -11,7 +11,7 @@ enum TranslationResponseMembership {
             )
         }
 
-        var resultsByIdentifier: [String: TranslationTransportResult] = [:]
+        var resultsByIdentifier: [String: TranslationResult] = [:]
         resultsByIdentifier.reserveCapacity(results.count)
         var duplicateCount = 0
         for result in results {

@@ -4,10 +4,8 @@ import Foundation
 ///
 /// Task cancellation is reported separately as `CancellationError`.
 public enum TranslationFailure: Error, Equatable, Sendable {
-    case invalidGoogleAppsScriptDeploymentID
     case invalidLanguageIdentifier
     case duplicateRequestIdentifiers(count: Int)
-    case providerUnavailable
     case automaticSourceLanguageUnavailable
     case unsupportedSourceLanguage
     case unsupportedTargetLanguage
@@ -16,9 +14,6 @@ public enum TranslationFailure: Error, Equatable, Sendable {
     case nothingToTranslate
     case languageAssetsNotInstalled
     case providerInternal
-    case transport
-    case serverRejected(statusCode: Int)
-    case malformedResponse
     case invalidResponseMembership(TranslationResponseMembershipFailure)
 }
 
@@ -32,14 +27,10 @@ public enum TranslationResponseMembershipFailure: Error, Equatable, Sendable {
 extension TranslationFailure: LocalizedError {
     public var errorDescription: String? {
         switch self {
-        case .invalidGoogleAppsScriptDeploymentID:
-            "The Google Apps Script deployment ID is invalid."
         case .invalidLanguageIdentifier:
             "The translation language identifier is not a supported ISO language tag."
         case .duplicateRequestIdentifiers(let count):
             "The translation request contains \(count) duplicate correlation identifier(s)."
-        case .providerUnavailable:
-            "The selected translation provider is unavailable."
         case .automaticSourceLanguageUnavailable:
             "The selected translation provider requires an explicit source language."
         case .unsupportedSourceLanguage:
@@ -56,12 +47,6 @@ extension TranslationFailure: LocalizedError {
             "The required on-device translation languages are not installed."
         case .providerInternal:
             "The translation provider encountered an internal failure."
-        case .transport:
-            "The translation provider could not be reached."
-        case .serverRejected(let statusCode):
-            "The translation server rejected the request with status \(statusCode)."
-        case .malformedResponse:
-            "The translation provider returned an invalid response."
         case .invalidResponseMembership(let failure):
             switch failure {
             case .unknownIdentifiers(let count):

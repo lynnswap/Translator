@@ -1,11 +1,24 @@
 import Translator
 
+private struct FixtureProvider: TranslationProvider {
+    let prefix: String
+
+    func translate(
+        _ requests: [TranslationRequest],
+        to targetLanguage: TranslationLanguage
+    ) async throws -> [TranslationResult] {
+        requests.map {
+            TranslationResult(
+                requestID: $0.id,
+                translatedText: "\(prefix)\($0.text)"
+            )
+        }
+    }
+}
+
 @main
 struct TranslatorConsumerFixture {
-    static func translateExample(
-        client: TranslationClient,
-        endpoint: GoogleAppsScriptEndpoint
-    ) async throws {
+    static func main() async throws {
         let french = try TranslationLanguage(identifier: "fr")
         let english = try TranslationLanguage(identifier: "en")
         let requests = [
@@ -15,33 +28,26 @@ struct TranslatorConsumerFixture {
                 sourceLanguage: .language(french)
             ),
         ]
-
-        for try await batch in client.translations(
+        let client = TranslationClient()
+        let results = client.translations(
             for: requests,
             to: english,
-            using: .googleAppsScript(endpoint)
-        ) {
-            for result in batch {
-                print(result.requestID, result.translatedText)
-            }
-        }
-    }
-
-    static func main() async throws {
-        let client = TranslationClient()
-        let endpoint = try GoogleAppsScriptEndpoint(deploymentID: "consumer-fixture")
-        let english = try TranslationLanguage(identifier: "en")
-        let results = client.translations(
-            for: [],
-            to: english,
-            using: .googleAppsScript(endpoint)
+            using: FixtureProvider(prefix: "translated:")
         )
 
-        var batchCount = 0
+        var received: [TranslationResult] = []
         for try await batch in results {
-            let _: [TranslationResult] = batch
-            batchCount += 1
+            received.append(contentsOf: batch)
         }
-        precondition(batchCount == 0)
+        precondition(received.map(\.translatedText) == ["translated:Bonjour"])
+
+        if #available(macOS 26.0, *) {
+            let onDevice: any TranslationProvider = OnDeviceTranslationProvider()
+            _ = client.translations(
+                for: requests,
+                to: english,
+                using: onDevice
+            )
+        }
     }
 }
