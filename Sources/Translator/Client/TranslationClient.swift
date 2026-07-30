@@ -8,6 +8,9 @@ public final class TranslationClient: Sendable {
 
     /// Creates a cold sequence that translates `requests` into `targetLanguage`.
     ///
+    /// Request identifiers must be unique within `requests`; duplicates terminate iteration with
+    /// ``TranslationFailure/duplicateRequestIdentifiers(count:)``.
+    ///
     /// Iteration yields cached results first in input order. If any requests miss the cache,
     /// the next element contains all fresh results in input order after the provider's complete
     /// result membership has been validated. Client and on-device failures are reported as
