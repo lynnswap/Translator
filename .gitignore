@@ -2,6 +2,8 @@
 /.build
 /Packages
 /.swiftpm/
+/Tests/ConsumerFixture/.build/
+/Tests/ConsumerFixture/.swiftpm/
 xcuserdata/
 DerivedData/
 .swiftpm/configuration/registries.json
