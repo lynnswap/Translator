@@ -60,6 +60,7 @@ struct TranslationOperation: Sendable {
                 misses.append(Miss(request: request, cacheKey: key))
             }
         }
+        try Task.checkCancellation()
         return Prepared(cachedResults: cachedResults, misses: misses)
     }
 
