@@ -1377,3 +1377,76 @@ func onDeviceCancellationAwaitsEverySourceDriver(iteration: Int) async throws {
     }
     #expect(probe.finishedCancellationCount == 2)
 }
+
+private final class CancellationCoordinatorProbe: Sendable {
+    enum Event: Equatable, Sendable {
+        case cleanupStarted
+        case finishStarted
+        case cleanupFinished
+        case finishReturned
+    }
+
+    let events: AsyncStream<Event>
+    private let eventContinuation: AsyncStream<Event>.Continuation
+    private let cleanupRelease: AsyncStream<Void>
+    private let cleanupReleaseContinuation: AsyncStream<Void>.Continuation
+
+    init() {
+        (events, eventContinuation) = AsyncStream.makeStream()
+        (cleanupRelease, cleanupReleaseContinuation) = AsyncStream.makeStream()
+    }
+
+    func runCleanup() async {
+        eventContinuation.yield(.cleanupStarted)
+        for await _ in cleanupRelease {
+            break
+        }
+        eventContinuation.yield(.cleanupFinished)
+    }
+
+    func recordFinishStarted() {
+        eventContinuation.yield(.finishStarted)
+    }
+
+    func releaseCleanup() {
+        cleanupReleaseContinuation.yield()
+        cleanupReleaseContinuation.finish()
+    }
+
+    func recordFinishReturned() {
+        eventContinuation.yield(.finishReturned)
+    }
+}
+
+@MainActor
+@Test func cancellationCoordinatorAwaitsCleanupBeforeFinishing() async {
+    let coordinator = OnDeviceCancellationCoordinator()
+    let probe = CancellationCoordinatorProbe()
+    var events = probe.events.makeAsyncIterator()
+
+    #expect(
+        coordinator.requestCancellation {
+            await probe.runCleanup()
+        }
+    )
+    #expect(await events.next() == .cleanupStarted)
+
+    let finishTask = Task { @MainActor in
+        probe.recordFinishStarted()
+        await coordinator.finishOperation()
+        probe.recordFinishReturned()
+    }
+    #expect(await events.next() == .finishStarted)
+    probe.releaseCleanup()
+    #expect(await events.next() == .cleanupFinished)
+    #expect(await events.next() == .finishReturned)
+    await finishTask.value
+}
+
+@Test func cancellationCoordinatorRejectsLateRequestAfterFinishing() async {
+    let coordinator = OnDeviceCancellationCoordinator()
+
+    await coordinator.finishOperation()
+
+    #expect(!coordinator.requestCancellation {})
+}

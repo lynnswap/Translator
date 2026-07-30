@@ -109,31 +109,28 @@ public struct OnDeviceTranslationProvider: TranslationProvider {
         _ requests: [TranslationRequest],
         using driver: OnDeviceTranslationDriver
     ) async throws -> [TranslationResult] {
-        let cancellation = OnDeviceCancellationTask()
+        let cancellation = OnDeviceCancellationCoordinator()
 
         do {
-            do {
-                let results = try await withTaskCancellationHandler {
-                    do {
-                        let results = try await driver.translate(requests)
-                        await cancellation.waitForCompletion(ifRequested: Task.isCancelled)
-                        try Task.checkCancellation()
-                        return results
-                    } catch {
-                        await cancellation.waitForCompletion(ifRequested: Task.isCancelled)
-                        throw error
-                    }
-                } onCancel: {
-                    cancellation.start {
-                        await driver.cancel()
-                    }
+            let results = try await withTaskCancellationHandler {
+                let results: [TranslationResult]
+                do {
+                    results = try await driver.translate(requests)
+                } catch {
+                    await cancellation.finishOperation()
+                    try Task.checkCancellation()
+                    throw error
                 }
-                await cancellation.waitForCompletionIfStarted()
+
+                await cancellation.finishOperation()
+                try Task.checkCancellation()
                 return results
-            } catch {
-                await cancellation.waitForCompletionIfStarted()
-                throw error
+            } onCancel: {
+                cancellation.requestCancellation {
+                    await driver.cancel()
+                }
             }
+            return results
         } catch is CancellationError {
             throw CancellationError()
         } catch let failure as TranslationFailure {
@@ -209,51 +206,50 @@ private actor OnDeviceTranslationSessionOwner {
     }
 }
 
-private final class OnDeviceCancellationTask: Sendable {
-    private struct State {
-        var task: Task<Void, Never>?
-        var waiters: [CheckedContinuation<Task<Void, Never>, Never>] = []
+final class OnDeviceCancellationCoordinator: Sendable {
+    private enum State {
+        case active
+        case cancelling(Task<Void, Never>)
+        case finished
     }
 
-    private let state = Mutex(State())
+    private let state = Mutex(State.active)
 
-    func start(operation: @escaping @Sendable () async -> Void) {
-        let (task, waiters) = state.withLock { state in
-            precondition(state.task == nil, "A cancellation handler must run at most once.")
-            // Publish the handle before releasing the lock: the cancellation handler and
-            // translation operation may run concurrently, and completion must await this task.
-            let task = Task {
-                await operation()
+    @discardableResult
+    func requestCancellation(
+        operation: @escaping @Sendable () async -> Void
+    ) -> Bool {
+        state.withLock { state in
+            switch state {
+            case .active:
+                state = .cancelling(
+                    Task {
+                        await operation()
+                    }
+                )
+                return true
+            case .cancelling:
+                preconditionFailure("A cancellation handler must run at most once.")
+            case .finished:
+                // Completion won the race, so no resource work remains to cancel.
+                return false
             }
-            state.task = task
-            defer { state.waiters.removeAll() }
-            return (task, state.waiters)
-        }
-        for waiter in waiters {
-            waiter.resume(returning: task)
         }
     }
 
-    func waitForCompletion(ifRequested cancellationWasRequested: Bool) async {
-        guard cancellationWasRequested else { return }
-
-        let task = await withCheckedContinuation { continuation in
-            let existingTask = state.withLock { state -> Task<Void, Never>? in
-                if let task = state.task {
-                    return task
-                }
-                state.waiters.append(continuation)
+    func finishOperation() async {
+        let task = state.withLock { state -> Task<Void, Never>? in
+            switch state {
+            case .active:
+                state = .finished
                 return nil
-            }
-            if let existingTask {
-                continuation.resume(returning: existingTask)
+            case .cancelling(let task):
+                state = .finished
+                return task
+            case .finished:
+                preconditionFailure("Cancellation coordination must finish exactly once.")
             }
         }
-        await task.value
-    }
-
-    func waitForCompletionIfStarted() async {
-        let task = state.withLock { $0.task }
         await task?.value
     }
 }
